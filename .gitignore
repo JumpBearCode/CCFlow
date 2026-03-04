@@ -1,0 +1,23 @@
+# Browser session data
+browser_data/
+
+# SQLite database
+*.db
+*.db-journal
+
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Screenshots
+screenshots/
+
+# OS
+.DS_Store
+Thumbs.db
+logs

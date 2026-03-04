@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ccflow"
+version = "0.1.0"
+description = "Claude Code orchestrator — reusable wrapper around `claude -p` CLI"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["ccflow"]
