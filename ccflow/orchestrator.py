@@ -41,6 +41,7 @@ class ClaudeOrchestrator:
         disallowed_tools: list[str] | None = None,
         tools: str | None = None,
         permission_mode: str | None = None,
+        dangerously_skip_permissions: bool = False,
         system_prompt: str | None = None,
         append_system_prompt: str | None = None,
         mcp_config: list[str] | None = None,
@@ -60,6 +61,7 @@ class ClaudeOrchestrator:
         self.disallowed_tools = disallowed_tools
         self.tools = tools
         self.permission_mode = permission_mode
+        self.dangerously_skip_permissions = dangerously_skip_permissions
         self.system_prompt = system_prompt
         self.append_system_prompt = append_system_prompt
         self.mcp_config = mcp_config
@@ -87,7 +89,9 @@ class ClaudeOrchestrator:
         if self.verbose:
             cmd.append("--verbose")
 
-        if self.permission_mode:
+        if self.dangerously_skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
+        elif self.permission_mode:
             cmd += ["--permission-mode", self.permission_mode]
 
         if self.tools:

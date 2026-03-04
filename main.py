@@ -9,9 +9,12 @@ from ccflow import ClaudeOrchestrator
 def main() -> None:
     parser = argparse.ArgumentParser(description="CCFlow: Claude Code Orchestrator")
     parser.add_argument("prompt", nargs="?", help="Prompt to send (reads stdin if omitted)")
-    parser.add_argument("-m", "--model", default="sonnet", help="Model name (default: sonnet)")
+    parser.add_argument("-m", "--model", default="opus", help="Model name (default: opus)")
     parser.add_argument("--batch", action="store_true", help="Batch mode (quiet, no streaming)")
     parser.add_argument("--plan", action="store_true", help="Plan mode (read-only exploration)")
+    parser.add_argument("--danger", action="store_true", help="Dangerously skip all permission checks")
+    parser.add_argument("-r", "--resume", metavar="SESSION_ID", help="Resume a previous session by ID")
+    parser.add_argument("-c", "--continue", dest="continue_session", action="store_true", help="Continue the most recent session")
     parser.add_argument("--allowed-tools", nargs="*", help="Allowed tools list")
     parser.add_argument("--log-dir", default="logs", help="Log directory (default: logs)")
     parser.add_argument("--cwd", help="Working directory for claude subprocess")
@@ -22,15 +25,21 @@ def main() -> None:
     prompt = args.prompt
     if not prompt:
         if sys.stdin.isatty():
-            parser.error("Provide a prompt as argument or pipe via stdin")
-        prompt = sys.stdin.read().strip()
-    if not prompt:
+            if not args.resume and not args.continue_session:
+                parser.error("Provide a prompt as argument or pipe via stdin")
+            prompt = ""  # resume/continue can work with empty prompt
+        else:
+            prompt = sys.stdin.read().strip()
+    if not prompt and not args.resume and not args.continue_session:
         parser.error("Empty prompt")
 
     orc = ClaudeOrchestrator(
         model=args.model,
         allowed_tools=args.allowed_tools,
         permission_mode="plan" if args.plan else None,
+        dangerously_skip_permissions=args.danger,
+        resume_session=args.resume,
+        continue_session="true" if args.continue_session else None,
         log_dir=args.log_dir,
         cwd=args.cwd,
         max_budget_usd=args.max_budget,
