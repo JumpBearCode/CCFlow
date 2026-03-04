@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument("-c", "--continue", dest="continue_session", action="store_true", help="Continue the most recent session")
     parser.add_argument("--allowed-tools", nargs="*", help="Allowed tools list")
     parser.add_argument("--log-dir", default="logs", help="Log directory (default: logs)")
+    parser.add_argument("--output-dir", help="Save result output to this directory as .md files")
     parser.add_argument("--cwd", help="Working directory for claude subprocess")
     parser.add_argument("--max-budget", type=float, help="Max budget in USD")
     args = parser.parse_args()
@@ -41,6 +42,7 @@ def main() -> None:
         resume_session=args.resume,
         continue_session="true" if args.continue_session else None,
         log_dir=args.log_dir,
+        output_dir=args.output_dir,
         cwd=args.cwd,
         max_budget_usd=args.max_budget,
     )
@@ -54,7 +56,7 @@ def main() -> None:
         print(f"\nError: {result.error}", file=sys.stderr)
         sys.exit(1)
 
-    if result.output:
+    if args.batch and result.output:
         print(f"\n{result.output}")
 
 

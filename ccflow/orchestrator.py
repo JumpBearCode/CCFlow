@@ -12,7 +12,25 @@ from ccflow import printer
 
 @dataclass
 class ClaudeResult:
-    """Result from a Claude CLI invocation."""
+    """Structured result from a single ``claude -p`` invocation.
+
+    Populated from the ``result`` event in the stream-json output.
+    On failure, ``success`` is False and ``error`` contains the reason;
+    all other fields may be None/zero.
+
+    Attributes:
+        success: Whether the invocation completed without error.
+        output: Final text output from the ``result`` event's ``result`` field.
+        duration_ms: Wall-clock duration of the entire session in milliseconds.
+        duration_api_ms: Server-side API processing time in milliseconds.
+        session_id: UUID of the session — pass to ``resume_session`` to continue later.
+        cost_usd: Equivalent API cost in USD. Informational only for Max Plan users.
+        num_turns: Number of assistant/user conversation turns.
+        usage: Raw token usage dict from the ``result`` event, containing
+            ``input_tokens``, ``output_tokens``, ``cache_read_input_tokens``,
+            ``cache_creation_input_tokens``, etc.
+        error: Error message when ``success`` is False, None otherwise.
+    """
 
     success: bool
     output: str | None = None
@@ -54,8 +72,50 @@ class ClaudeOrchestrator:
         resume_session: str | None = None,
         log_dir: str | None = None,
         log_path: str | None = None,
+        output_dir: str | None = None,
         cwd: str | None = None,
     ) -> None:
+        """Initialize the orchestrator with Claude CLI configuration.
+
+        All parameters are keyword-only and map directly to ``claude`` CLI flags.
+
+        Args:
+            model: Model name or alias (e.g. ``"opus"``, ``"sonnet"``, ``"haiku"``,
+                or a full model ID like ``"claude-opus-4-6"``). Default: ``"opus"``.
+            allowed_tools: Whitelist of tool names. Each becomes a separate
+                ``--allowedTools`` flag (e.g. ``["Bash(git:*)", "Read", "Glob"]``).
+            disallowed_tools: Blacklist of tool names. Each becomes a separate
+                ``--disallowedTools`` flag.
+            tools: Raw ``--tools`` value passed directly to CLI (e.g. ``"default"``
+                or ``""`` to disable all).
+            permission_mode: One of ``"plan"``, ``"default"``, ``"acceptEdits"``,
+                ``"bypassPermissions"``, ``"dontAsk"``. Ignored if
+                ``dangerously_skip_permissions`` is True.
+            dangerously_skip_permissions: If True, passes
+                ``--dangerously-skip-permissions`` to bypass all permission checks.
+                Overrides ``permission_mode``.
+            system_prompt: Override the default system prompt entirely.
+            append_system_prompt: Append text to the default system prompt.
+            mcp_config: List of MCP server config file paths. Each becomes a
+                separate ``--mcp-config`` flag.
+            strict_mcp_config: If True, only use MCP servers from ``mcp_config``,
+                ignoring all other MCP configurations.
+            verbose: Pass ``--verbose`` to the CLI. Default: True.
+            max_budget_usd: Maximum dollar amount to spend on API calls.
+            effort: Effort level — ``"low"``, ``"medium"``, or ``"high"``.
+            session_id: Use a specific UUID as the session ID.
+            continue_session: Continue the most recent session. Pass ``"true"``
+                or the session ID string.
+            resume_session: Resume a specific previous session by its UUID.
+            log_dir: Directory for auto-generated log files. Log files are named
+                ``ccflow-YYYYMMDD-HHMMSS.log``. Ignored if ``log_path`` is set.
+            log_path: Explicit path for the log file. Takes priority over ``log_dir``.
+            output_dir: Directory to write ``result.output`` after each run. Output
+                files are named ``ccflow-YYYYMMDD-HHMMSS.md``. Only writes when the
+                run succeeds and produces output.
+            cwd: Working directory for the ``claude`` subprocess. Defaults to the
+                current working directory of the parent process.
+        """
         self.model = model
         self.allowed_tools = allowed_tools
         self.disallowed_tools = disallowed_tools
@@ -74,12 +134,23 @@ class ClaudeOrchestrator:
         self.resume_session = resume_session
         self.log_dir = log_dir
         self.log_path = log_path
+        self.output_dir = output_dir
         self.cwd = cwd
 
     # ── private helpers ──────────────────────────────────────
 
     def _build_cmd(self) -> list[str]:
-        """Convert configuration into a ``claude`` CLI argument list."""
+        """Convert the orchestrator's configuration into a ``claude`` CLI argument list.
+
+        Always includes ``-p``, ``--output-format stream-json``, and ``--model``.
+        Conditionally appends flags based on which attributes are set.
+        Tools in ``allowed_tools`` / ``disallowed_tools`` are each repeated as
+        separate ``--allowedTools`` / ``--disallowedTools`` flags (the CLI expects
+        one tool name per flag).
+
+        Returns:
+            List of strings suitable for ``subprocess.Popen()``.
+        """
         cmd = [
             "claude", "-p",
             "--output-format", "stream-json",
@@ -136,7 +207,15 @@ class ClaudeOrchestrator:
         return cmd
 
     def _resolve_log_path(self) -> str | None:
-        """Return an explicit log path, or auto-generate one from log_dir."""
+        """Determine the log file path for this run.
+
+        Priority: ``log_path`` (explicit) > ``log_dir`` (auto-generate) > None.
+        When using ``log_dir``, generates a filename like
+        ``ccflow-20260303-093015.log`` based on the current timestamp.
+
+        Returns:
+            Absolute or relative path string, or None if logging is disabled.
+        """
         if self.log_path:
             return self.log_path
         if self.log_dir:
@@ -144,8 +223,58 @@ class ClaudeOrchestrator:
             return os.path.join(self.log_dir, f"ccflow-{ts}.log")
         return None
 
+    def _write_output(self, result: ClaudeResult) -> str | None:
+        """Write ``result.output`` to a file in ``output_dir`` if configured.
+
+        Creates the directory if it doesn't exist. The filename is
+        ``ccflow-YYYYMMDD-HHMMSS.md``. Only writes when the result has output.
+
+        Args:
+            result: The ``ClaudeResult`` from a completed run.
+
+        Returns:
+            The path to the written file, or None if nothing was written.
+        """
+        if not self.output_dir or not result.success or not result.output:
+            return None
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_path = os.path.join(self.output_dir, f"ccflow-{ts}.md")
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(result.output)
+        return output_path
+
     def _execute(self, prompt: str, *, stream: bool) -> ClaudeResult:
-        """Shared execution core for both batch and stream modes."""
+        """Shared execution core for both ``run()`` and ``run_stream()``.
+
+        Lifecycle:
+            1. Build the CLI command via ``_build_cmd()``.
+            2. Resolve the log path and create parent directories.
+            3. Strip ``CLAUDECODE*`` env vars to support nested Claude invocations.
+            4. Spawn ``claude -p`` via ``subprocess.Popen`` with stdin/stdout pipes.
+            5. Write the prompt to stdin, then close it.
+            6. Read stdout line-by-line, parsing each as a JSON event:
+               - Every raw line is written to the log file (if configured).
+               - Non-JSON lines are treated as stderr passthrough.
+               - ``system:init`` → extract ``session_id``.
+               - ``result`` → extract all metadata (output, duration, cost, turns, usage).
+               - In stream mode, every event except ``result`` is printed via
+                 ``printer.print_event()``; the result banner is printed separately.
+            7. Wait for the process to exit.
+            8. Print completion summary (banner in stream mode, one-liner in batch).
+            9. Return a populated ``ClaudeResult``.
+
+        Args:
+            prompt: The prompt text to send to Claude.
+            stream: If True, print events in real-time (stream mode).
+                If False, print only a summary line (batch mode).
+
+        Returns:
+            A ``ClaudeResult`` with all extracted metadata.
+
+        Raises:
+            Never raises — errors are captured in ``ClaudeResult.error``.
+        """
         cmd = self._build_cmd()
         log_path = self._resolve_log_path()
         log_file = None
@@ -285,7 +414,7 @@ class ClaudeOrchestrator:
                     session_id=result_session_id,
                 )
 
-            return ClaudeResult(
+            cr = ClaudeResult(
                 success=True,
                 output=result_output,
                 duration_ms=result_duration_ms,
@@ -295,6 +424,19 @@ class ClaudeOrchestrator:
                 num_turns=result_num_turns,
                 usage=result_usage,
             )
+
+            # Write output to disk if configured
+            output_path = self._write_output(cr)
+            if output_path:
+                ts = printer.timestamp()
+                print(
+                    f"{printer.DIM}[{ts}]{printer.RESET} "
+                    f"{printer.BOLD}CCFlow{printer.RESET} "
+                    f"Output saved: {output_path}",
+                    flush=True,
+                )
+
+            return cr
 
         except FileNotFoundError:
             return ClaudeResult(
@@ -310,9 +452,32 @@ class ClaudeOrchestrator:
     # ── public API ───────────────────────────────────────────
 
     def run(self, prompt: str) -> ClaudeResult:
-        """Run in batch mode — minimal output, returns final result."""
+        """Run Claude in batch mode.
+
+        Prints a single "Running..." line at the start and a summary line at
+        the end (duration, cost, turns, token breakdown, session ID).
+        No intermediate events are printed.
+
+        Args:
+            prompt: The prompt text to send to Claude.
+
+        Returns:
+            A ``ClaudeResult`` containing the final output and session metadata.
+        """
         return self._execute(prompt, stream=False)
 
     def run_stream(self, prompt: str) -> ClaudeResult:
-        """Run in stream mode — real-time Claude Code style printing."""
+        """Run Claude in stream mode with real-time formatted output.
+
+        Prints events as they arrive in Claude Code CLI style:
+        session banner, assistant text, tool calls (``⏺``), tool results
+        (``⎿``), thinking indicators, and a result banner at the end with
+        duration, cost, turns, token breakdown, and session ID.
+
+        Args:
+            prompt: The prompt text to send to Claude.
+
+        Returns:
+            A ``ClaudeResult`` containing the final output and session metadata.
+        """
         return self._execute(prompt, stream=True)
