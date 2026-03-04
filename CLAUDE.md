@@ -2,14 +2,49 @@
 
 CCFlow is a Claude Code CLI wrapper -- a Python library + CLI that wraps `claude -p` (Claude Code's non-interactive mode) into a reusable interface. It parses `stream-json` output in real-time, prints Claude Code style formatted output, and logs every session.
 
+## Install & Integration
+
+### Other uv projects — add as Git dependency
+
+In the other project's `pyproject.toml`:
+
+```toml
+[project]
+dependencies = [
+    "ccflow @ git+https://github.com/JumpBearCode/CCFlow.git",
+]
+```
+
+Then `uv sync`. After that:
+
+```python
+from ccflow import ClaudeOrchestrator
+```
+
+And the `ccflow` CLI command is available via `uv run ccflow "prompt" --danger`.
+
+### Other install methods
+
+```bash
+# uv add (from GitHub)
+uv add git+https://github.com/JumpBearCode/CCFlow.git
+
+# uv add (from local path)
+uv add /path/to/CCFlow
+
+# pip
+pip install git+https://github.com/JumpBearCode/CCFlow.git
+```
+
 ## Project Structure
 
 ```
 CCFlow/
-  main.py                  # CLI entry point (run with uv)
-  pyproject.toml            # zero dependencies, Python >=3.11
+  main.py                  # convenience wrapper → ccflow.cli.main()
+  pyproject.toml            # zero dependencies, Python >=3.11, [project.scripts] ccflow
   ccflow/
     __init__.py             # exports ClaudeOrchestrator, ClaudeResult
+    cli.py                  # CLI entry point — installed as `ccflow` command
     orchestrator.py         # core class — builds CLI args, runs subprocess, parses events
     printer.py              # Claude Code style terminal printer (╭╰│⏺⎿ + timestamps)
 ```
@@ -18,36 +53,32 @@ CCFlow/
 
 All commands assume you're in the `CCFlow/` directory.
 
-### CLI (main.py)
+### CLI
+
+After install, the `ccflow` command is available (or use `uv run ccflow` / `uv run main.py`):
 
 ```bash
-# Basic — stream mode with opus (default model)
-uv run main.py "analyze this codebase"
-
-# Skip all permission checks
-uv run main.py "refactor this file" --danger
+# Stream mode (default, opus model)
+ccflow "analyze this codebase" --danger
 
 # Plan mode — read-only exploration
-uv run main.py "design a new feature" --plan
+ccflow "design a new feature" --plan
 
-# Resume a previous session
-uv run main.py "keep going" --resume <SESSION_ID>
-uv run main.py "keep going" -r <SESSION_ID> --danger
+# Resume / continue
+ccflow "keep going" -r <SESSION_ID> --danger
+ccflow "continue" -c --danger
 
-# Continue most recent session
-uv run main.py "continue" -c --danger
-
-# Batch mode — no streaming, prints token breakdown + session ID at end
-uv run main.py "summarize" --batch
+# Batch mode — no streaming, prints token breakdown + session ID
+ccflow "summarize" --batch --danger
 
 # Specify model, budget, tools
-uv run main.py "fix the bug" -m sonnet --max-budget 1.0 --allowed-tools Bash Read Glob Grep
+ccflow "fix the bug" -m sonnet --max-budget 1.0 --allowed-tools Bash Read Glob Grep
 
 # Pipe prompt from stdin
-cat SKILL.md | uv run main.py --danger
+cat SKILL.md | ccflow --danger
 
 # Specify working directory
-uv run main.py "analyze" --cwd /path/to/project --danger
+ccflow "analyze" --cwd /path/to/project --danger
 ```
 
 ### CLI Flags
