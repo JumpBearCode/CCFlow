@@ -110,9 +110,8 @@ def print_result_banner(
     session_id: str | None,
     num_turns: int | None,
     usage: dict | None = None,
-    tracker_lines: list[str] | None = None,
 ) -> None:
-    """Print session complete banner with optional token usage and tracker stats."""
+    """Print session complete banner with optional token usage."""
     parts: list[str] = []
     parts.append(f"Duration: {duration_ms / 1000:.1f}s")
     if cost_usd is not None:
@@ -138,12 +137,6 @@ def print_result_banner(
             token_parts.append(f"{_fmt_tokens(cache_write)} cache-write")
         _ts_print(f"{DIM}│{RESET}  Tokens: {' + '.join(token_parts)}")
 
-    # Rolling window stats from tracker
-    if tracker_lines:
-        _ts_print(f"{DIM}│{RESET}  {DIM}{'─' * (BANNER_WIDTH - 3)}{RESET}")
-        for line in tracker_lines:
-            _ts_print(f"{DIM}│{RESET}  {line}")
-
     if session_id:
         _ts_print(f"{DIM}│{RESET}  Session: {session_id}")
     _ts_print(f"{DIM}╰{'─' * BANNER_WIDTH}{RESET}")
@@ -154,7 +147,7 @@ def _fmt_tokens(n: int) -> str:
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
     if n >= 1_000:
-        return f"{n / 1_000:.0f}k"
+        return f"{n / 1_000:.1f}k"
     return str(n)
 
 

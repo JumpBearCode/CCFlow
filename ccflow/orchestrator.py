@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 
 from ccflow import printer
-from ccflow.tracker import UsageTracker
 
 
 @dataclass
@@ -37,7 +36,7 @@ class ClaudeOrchestrator:
     def __init__(
         self,
         *,
-        model: str = "sonnet",
+        model: str = "opus",
         allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         tools: str | None = None,
@@ -55,7 +54,6 @@ class ClaudeOrchestrator:
         log_dir: str | None = None,
         log_path: str | None = None,
         cwd: str | None = None,
-        usage_tracker: UsageTracker | bool = True,
     ) -> None:
         self.model = model
         self.allowed_tools = allowed_tools
@@ -75,14 +73,6 @@ class ClaudeOrchestrator:
         self.log_dir = log_dir
         self.log_path = log_path
         self.cwd = cwd
-
-        # Usage tracker: True = default tracker, False = disabled, or pass your own
-        if usage_tracker is True:
-            self.tracker = UsageTracker()
-        elif isinstance(usage_tracker, UsageTracker):
-            self.tracker = usage_tracker
-        else:
-            self.tracker = None
 
     # ── private helpers ──────────────────────────────────────
 
@@ -239,15 +229,8 @@ class ClaudeOrchestrator:
                     result_cost_usd = event.get("total_cost_usd")
                     result_num_turns = event.get("num_turns")
                     result_usage = event.get("usage")
-                    result_model_usage = event.get("modelUsage")
 
             proc.wait()
-
-            # Record usage and get rolling window stats
-            tracker_lines: list[str] | None = None
-            if self.tracker and result_model_usage:
-                self.tracker.record(result_model_usage, session_id=result_session_id)
-                tracker_lines = self.tracker.format_stats()
 
             # Print completion — stream gets full banner, batch gets one-liner
             if stream:
@@ -257,7 +240,6 @@ class ClaudeOrchestrator:
                     session_id=result_session_id,
                     num_turns=result_num_turns,
                     usage=result_usage,
-                    tracker_lines=tracker_lines,
                 )
             else:
                 parts = [f"Done ({result_duration_ms / 1000:.1f}s)"]
@@ -272,14 +254,6 @@ class ClaudeOrchestrator:
                     + "  │  ".join(parts),
                     flush=True,
                 )
-                if tracker_lines:
-                    for line in tracker_lines:
-                        ts = printer.timestamp()
-                        print(
-                            f"{printer.DIM}[{ts}]{printer.RESET} "
-                            f"{printer.BOLD}CCFlow{printer.RESET} {line}",
-                            flush=True,
-                        )
 
             if proc.returncode != 0 and result_output is None:
                 return ClaudeResult(
