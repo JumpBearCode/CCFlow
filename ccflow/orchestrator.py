@@ -251,6 +251,17 @@ class ClaudeOrchestrator:
                     parts.append(f"${result_cost_usd:.4f}")
                 if result_num_turns is not None:
                     parts.append(f"{result_num_turns} turns")
+                if result_usage:
+                    inp = result_usage.get("input_tokens", 0)
+                    out = result_usage.get("output_tokens", 0)
+                    cache_read = result_usage.get("cache_read_input_tokens", 0)
+                    cache_write = result_usage.get("cache_creation_input_tokens", 0)
+                    token_parts = [f"{printer._fmt_tokens(inp)} in", f"{printer._fmt_tokens(out)} out"]
+                    if cache_read:
+                        token_parts.append(f"{printer._fmt_tokens(cache_read)} cached")
+                    if cache_write:
+                        token_parts.append(f"{printer._fmt_tokens(cache_write)} cache-write")
+                    parts.append(" + ".join(token_parts))
                 ts = printer.timestamp()
                 print(
                     f"{printer.DIM}[{ts}]{printer.RESET} "
@@ -258,6 +269,14 @@ class ClaudeOrchestrator:
                     + "  │  ".join(parts),
                     flush=True,
                 )
+                if result_session_id:
+                    ts = printer.timestamp()
+                    print(
+                        f"{printer.DIM}[{ts}]{printer.RESET} "
+                        f"{printer.BOLD}CCFlow{printer.RESET} "
+                        f"Session: {result_session_id}",
+                        flush=True,
+                    )
 
             if proc.returncode != 0 and result_output is None:
                 return ClaudeResult(

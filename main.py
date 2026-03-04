@@ -54,6 +54,9 @@ def main() -> None:
         print(f"\nError: {result.error}", file=sys.stderr)
         sys.exit(1)
 
+    if result.output:
+        print(f"\n{result.output}")
+
 
 if __name__ == "__main__":
     main()
