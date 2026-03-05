@@ -61,8 +61,6 @@ def main() -> None:
         if not result.success:
             print(f"\nError: {result.error}", file=sys.stderr)
             sys.exit(1)
-        if result.output:
-            print(f"\n{result.output}")
     else:
         result = orc.run_stream(prompt)
         if not result.success:

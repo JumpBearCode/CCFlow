@@ -456,6 +456,9 @@ class ClaudeOrchestrator:
             result = self._call(prompt, log_file=log_file, print_events=False, print_banner=False)
             self._print_batch_summary(result)
 
+            if result.success and result.output:
+                print(f"\n{result.output}", flush=True)
+
             output_path = self._write_output(result)
             if output_path:
                 self._print_output_saved(output_path)
