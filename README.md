@@ -5,6 +5,7 @@ Claude Code CLI wrapper — a Python library + CLI that wraps `claude -p` into a
 - Parses `stream-json` output in real-time
 - Prints Claude Code style formatted output (banners, tool calls, timestamps)
 - Token breakdown per run (input/output/cached/cache-write)
+- Multi-round interactive conversation mode
 - Session resume/continue support
 - Zero external dependencies, Python >=3.11
 
@@ -82,8 +83,7 @@ orc = ClaudeOrchestrator(
 result = orc.run_stream("analyze this codebase")
 
 if result.success:
-    print(result.output)
-    print(f"Session: {result.session_id}")  # save for resuming
+    print(result.session_id)  # save for resuming
 ```
 
 ### Step 3: Use the CLI command
@@ -100,8 +100,12 @@ uv run ccflow "your prompt" --danger
 # Stream mode (default, opus model)
 ccflow "analyze this codebase" --danger
 
-# Batch mode — no streaming, prints summary + result
+# Batch mode — prints summary + result output
 ccflow "summarize" --batch --danger
+
+# Chat mode — interactive multi-round conversation
+ccflow -i --danger
+ccflow -i "start with this" --danger
 
 # Plan mode — read-only exploration
 ccflow "design a new feature" --plan
@@ -115,6 +119,9 @@ ccflow "fix the bug" -m sonnet --max-budget 1.0 --allowed-tools Bash Read Glob G
 
 # Pipe prompt from stdin
 cat instructions.md | ccflow --danger
+
+# Save result output to disk
+ccflow "summarize" --danger --output-dir outputs
 ```
 
 ### Flags
@@ -124,7 +131,8 @@ cat instructions.md | ccflow --danger
 | `<prompt>` | Prompt text (positional, or pipe via stdin) |
 | `-m, --model` | Model name (default: `opus`) |
 | `--danger` | Skip all permission checks |
-| `--batch` | No streaming, prints token summary + session ID |
+| `--batch` | No streaming, prints summary + result output |
+| `-i, --chat` | Interactive multi-round conversation |
 | `--plan` | Read-only plan mode |
 | `-r, --resume ID` | Resume a previous session |
 | `-c, --continue` | Continue most recent session |
@@ -132,6 +140,7 @@ cat instructions.md | ccflow --danger
 | `--max-budget` | Budget cap in USD |
 | `--cwd` | Working directory |
 | `--log-dir` | Log directory (default: `logs`) |
+| `--output-dir` | Save result output as `.md` files |
 
 ## Python API
 
@@ -147,8 +156,13 @@ orc = ClaudeOrchestrator(
 )
 result = orc.run_stream("your prompt")
 
-# Batch — quiet, returns result
+# Batch — prints summary + result output
 result = orc.run("your prompt")
+
+# Chat — multi-round interactive conversation
+results = orc.run_conversation("start with this")
+# or let it prompt interactively:
+results = orc.run_conversation()
 
 # Resume a previous session
 orc = ClaudeOrchestrator(
@@ -179,25 +193,37 @@ result.usage            # {"input_tokens": ..., "output_tokens": ..., ...}
 result.error            # error message if success=False
 ```
 
+## Architecture
+
+```
+ClaudeOrchestrator
+├── _call(prompt, ...)           → ClaudeResult        Core: subprocess + parse events
+├── run(prompt)                  → ClaudeResult        Batch: summary + print output
+├── run_stream(prompt)           → ClaudeResult        Stream: real-time events + result banner
+└── run_conversation(prompt)     → list[ClaudeResult]  Chat: multi-round, accumulated summary
+```
+
+All three public methods are fully decoupled — each independently composes `_call()` + shared helpers.
+
 ## Output Examples
 
 ### Stream mode
 
 ```
-[09:30:15] ╭─ CCFlow Session ─────────────────────────────────
+[09:30:15] ╭─ CCFlow Session ─────────────────────────────────────
 [09:30:15] │  Model: claude-opus-4-6
 [09:30:15] │  Started: 2026-03-03 09:30:15
-[09:30:15] ╰──────────────────────────────────────────────────
+[09:30:15] ╰──────────────────────────────────────────────────────
 
 [09:30:16] I'll analyze the codebase structure.
 [09:30:16] ⏺ Bash  command='find . -type f | head -20'
 [09:30:17]   ⎿  Done
 
-[09:30:25] ╭─ Session Complete ────────────────────────────────
+[09:30:25] ╭─ Session Complete ────────────────────────────────────
 [09:30:25] │  Duration: 10.2s  │  Turns: 3
 [09:30:25] │  Tokens: 160k in + 966 out + 20k cache-write
 [09:30:25] │  Session: abc-123-def
-[09:30:25] ╰──────────────────────────────────────────────────
+[09:30:25] ╰──────────────────────────────────────────────────────
 ```
 
 ### Batch mode
@@ -206,4 +232,34 @@ result.error            # error message if success=False
 [09:30:15] CCFlow Running (opus)...
 [09:30:25] CCFlow Done (10.2s)  │  3 turns  │  160k in + 966 out + 20k cache-write
 [09:30:25] CCFlow Session: abc-123-def
+
+<result output printed here>
+```
+
+### Chat mode
+
+```
+[09:30:15] ╭─ CCFlow Session ─────────────────────────────────────
+[09:30:15] │  Model: claude-opus-4-6
+[09:30:15] │  Started: 2026-03-03 09:30:15
+[09:30:15] ╰──────────────────────────────────────────────────────
+
+[09:30:16] I'll analyze the codebase structure.
+[09:30:16] ⏺ Bash  command='find . -type f | head -20'
+[09:30:17]   ⎿  Done
+
+You: what about the tests?
+
+[09:30:45] Let me look at the test files.
+[09:30:45] ⏺ Glob  pattern="**/*test*"
+[09:30:46]   ⎿  Done
+
+You: exit
+
+[09:31:00] ╭─ Conversation Complete ───────────────────────────────
+[09:31:00] │  Duration: 45.2s  │  Cost: $0.1523  │  Turns: 6
+[09:31:00] │  Tokens: 320k in + 2.1k out + 40k cached
+[09:31:00] │  Rounds: 2
+[09:31:00] │  Session: abc-123-def
+[09:31:00] ╰──────────────────────────────────────────────────────
 ```

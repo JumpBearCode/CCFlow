@@ -49,6 +49,18 @@ CCFlow/
     printer.py              # Claude Code style terminal printer (╭╰│⏺⎿ + timestamps)
 ```
 
+## Architecture
+
+```
+ClaudeOrchestrator
+├── _call(prompt, log_file, print_events, print_banner) → ClaudeResult   # core: subprocess + parse
+├── run(prompt)              → ClaudeResult        # batch: summary + print output
+├── run_stream(prompt)       → ClaudeResult        # stream: real-time events + result banner
+└── run_conversation(prompt) → list[ClaudeResult]  # chat: multi-round, one log, accumulated summary
+```
+
+All three public methods are fully decoupled — each independently composes `_call()` + shared helpers.
+
 ## How to Run
 
 All commands assume you're in the `CCFlow/` directory.
@@ -61,15 +73,19 @@ After install, the `ccflow` command is available (or use `uv run ccflow` / `uv r
 # Stream mode (default, opus model)
 ccflow "analyze this codebase" --danger
 
+# Batch mode — no streaming, prints summary + result output
+ccflow "summarize" --batch --danger
+
+# Chat mode — interactive multi-round conversation
+ccflow -i --danger
+ccflow -i "start with this" --danger
+
 # Plan mode — read-only exploration
 ccflow "design a new feature" --plan
 
 # Resume / continue
 ccflow "keep going" -r <SESSION_ID> --danger
 ccflow "continue" -c --danger
-
-# Batch mode — no streaming, prints token breakdown + session ID
-ccflow "summarize" --batch --danger
 
 # Specify model, budget, tools
 ccflow "fix the bug" -m sonnet --max-budget 1.0 --allowed-tools Bash Read Glob Grep
@@ -87,7 +103,8 @@ ccflow "analyze" --cwd /path/to/project --danger
 |---|---|
 | `<prompt>` | Prompt text (positional, optional if piping stdin) |
 | `-m, --model MODEL` | Model name (default: `opus`) |
-| `--batch` | Batch mode — no streaming, shows summary at end |
+| `--batch` | Batch mode — no streaming, prints summary + result output |
+| `-i, --chat` | Interactive multi-round conversation |
 | `--plan` | Plan mode — read-only, no file modifications |
 | `--danger` | Skip all permission checks (`--dangerously-skip-permissions`) |
 | `-r, --resume SESSION_ID` | Resume a previous session by ID |
@@ -96,8 +113,7 @@ ccflow "analyze" --cwd /path/to/project --danger
 | `--max-budget USD` | Budget cap in USD |
 | `--cwd PATH` | Working directory for the claude subprocess |
 | `--log-dir DIR` | Log directory (default: `logs`) |
-
-On success, `main.py` prints `result.output` to stdout. On failure, it prints the error to stderr and exits with code 1.
+| `--output-dir DIR` | Save result output to this directory as `.md` files |
 
 ### Python API
 
@@ -112,9 +128,13 @@ orc = ClaudeOrchestrator(
 )
 result = orc.run_stream("analyze this codebase")
 
-# Batch mode — no streaming, prints summary line with token breakdown + session ID
+# Batch mode — prints summary + result output
 result = orc.run("summarize this project")
-print(result.output)
+
+# Chat mode — multi-round interactive conversation
+results = orc.run_conversation("start with this")
+# or let it prompt interactively:
+results = orc.run_conversation()
 
 # Resume a session
 orc = ClaudeOrchestrator(
@@ -146,6 +166,7 @@ result = orc.run_stream("continue the task")
 | `resume_session` | `str` | `None` | Resume a specific session by ID |
 | `log_dir` | `str` | `None` | Auto-generate log path in this dir |
 | `log_path` | `str` | `None` | Explicit log file path |
+| `output_dir` | `str` | `None` | Save result output to this dir as `.md` files |
 | `cwd` | `str` | `None` | Working directory for subprocess |
 
 ### ClaudeResult fields
@@ -168,5 +189,6 @@ result.error            # error message if success=False
 - Removes `CLAUDECODE*` env vars to support nested Claude invocations
 - Prompt is sent via stdin (`proc.stdin.write`), not as a CLI argument
 - Logs every raw JSON line to `logs/ccflow-YYYYMMDD-HHMMSS.log`
-- Stream mode prints a session banner at start and a result banner at end (duration, cost, turns, token breakdown, session ID)
-- Batch mode prints a one-liner summary with token breakdown (in/out/cached/cache-write) and session ID
+- `run()` (batch): prints summary line + `result.output`
+- `run_stream()`: prints real-time events + result banner (no separate output print — already streamed)
+- `run_conversation()`: one log file for all rounds, session banner on first round only, accumulated summary at the end with round count

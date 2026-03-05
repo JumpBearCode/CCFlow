@@ -3,9 +3,10 @@
 import json
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import IO
 
 from ccflow import printer
 
@@ -46,9 +47,10 @@ class ClaudeResult:
 class ClaudeOrchestrator:
     """High-level wrapper around ``claude -p`` with stream-json parsing.
 
-    Supports two execution modes:
+    Supports three execution modes:
     - ``run(prompt)`` — batch mode, minimal output, returns final result
     - ``run_stream(prompt)`` — stream mode, real-time Claude Code style printing
+    - ``run_conversation(initial_prompt)`` — multi-round interactive conversation
     """
 
     def __init__(
@@ -244,47 +246,45 @@ class ClaudeOrchestrator:
             f.write(result.output)
         return output_path
 
-    def _execute(self, prompt: str, *, stream: bool) -> ClaudeResult:
-        """Shared execution core for both ``run()`` and ``run_stream()``.
+    def _open_log(self) -> tuple[str | None, IO[str] | None]:
+        """Resolve log path and open the log file.
 
-        Lifecycle:
-            1. Build the CLI command via ``_build_cmd()``.
-            2. Resolve the log path and create parent directories.
-            3. Strip ``CLAUDECODE*`` env vars to support nested Claude invocations.
-            4. Spawn ``claude -p`` via ``subprocess.Popen`` with stdin/stdout pipes.
-            5. Write the prompt to stdin, then close it.
-            6. Read stdout line-by-line, parsing each as a JSON event:
-               - Every raw line is written to the log file (if configured).
-               - Non-JSON lines are treated as stderr passthrough.
-               - ``system:init`` → extract ``session_id``.
-               - ``result`` → extract all metadata (output, duration, cost, turns, usage).
-               - In stream mode, every event except ``result`` is printed via
-                 ``printer.print_event()``; the result banner is printed separately.
-            7. Wait for the process to exit.
-            8. Print completion summary (banner in stream mode, one-liner in batch).
-            9. Return a populated ``ClaudeResult``.
+        Returns:
+            Tuple of (log_path, log_file). Both are None if logging is disabled.
+        """
+        log_path = self._resolve_log_path()
+        if not log_path:
+            return None, None
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        return log_path, open(log_path, "w", encoding="utf-8")
+
+    def _call(
+        self,
+        prompt: str,
+        *,
+        log_file: IO[str] | None = None,
+        print_events: bool = False,
+        print_banner: bool = False,
+    ) -> ClaudeResult:
+        """Core execution: spawn ``claude -p``, parse events, return result.
+
+        This is the pure subprocess + parsing layer. It does NOT manage log file
+        lifecycle, print summaries/banners (except inline streaming events), or
+        write output files. Callers handle all decoration.
 
         Args:
-            prompt: The prompt text to send to Claude.
-            stream: If True, print events in real-time (stream mode).
-                If False, print only a summary line (batch mode).
+            prompt: The prompt text to send to Claude via stdin.
+            log_file: An already-open file handle for logging raw JSON lines.
+                Caller owns the lifecycle. If None, no logging.
+            print_events: If True, print streaming events via ``printer.print_event()``.
+            print_banner: If True (and ``print_events`` is True), allow the
+                ``system:init`` event to trigger the session banner.
 
         Returns:
             A ``ClaudeResult`` with all extracted metadata.
-
-        Raises:
-            Never raises — errors are captured in ``ClaudeResult.error``.
         """
-        cmd = self._build_cmd()
-        log_path = self._resolve_log_path()
-        log_file = None
-
-        if log_path:
-            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-            log_file = open(log_path, "w", encoding="utf-8")
-
         try:
-            # Remove CLAUDECODE env vars to support nested invocations
+            cmd = self._build_cmd()
             env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDECODE")}
 
             proc = subprocess.Popen(
@@ -297,11 +297,9 @@ class ClaudeOrchestrator:
                 cwd=self.cwd,
             )
 
-            # Send prompt via stdin
             proc.stdin.write(prompt)
             proc.stdin.close()
 
-            # State for result extraction
             result_output = None
             result_session_id = None
             result_duration_ms = 0
@@ -310,32 +308,19 @@ class ClaudeOrchestrator:
             result_num_turns = None
             result_usage = None
 
-            if not stream:
-                ts = printer.timestamp()
-                print(
-                    f"{printer.DIM}[{ts}]{printer.RESET} "
-                    f"{printer.BOLD}CCFlow{printer.RESET} "
-                    f"Running ({self.model})...",
-                    flush=True,
-                )
-
-            # Read stdout line by line
             for line in proc.stdout:
                 line = line.rstrip("\n")
                 if not line:
                     continue
 
-                # Write raw line to log
                 if log_file:
                     log_file.write(line + "\n")
                     log_file.flush()
 
-                # Parse JSON event
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
-                    # Non-JSON line (stderr passthrough)
-                    if stream:
+                    if print_events:
                         ts = printer.timestamp()
                         print(
                             f"{printer.DIM}[{ts}] [stderr] {line}{printer.RESET}",
@@ -345,16 +330,11 @@ class ClaudeOrchestrator:
 
                 etype = event.get("type", "")
 
-                # Stream mode: print every event EXCEPT result (we handle it below)
-                if stream and etype != "result":
-                    printer.print_event(event)
-
-                # Extract session_id from init
                 if etype == "system" and event.get("subtype") == "init":
                     result_session_id = event.get("session_id")
-
-                # Extract metadata from result
-                if etype == "result":
+                    if print_events and print_banner:
+                        printer.print_event(event)
+                elif etype == "result":
                     result_output = event.get("result")
                     result_duration_ms = event.get("duration_ms", 0)
                     result_duration_api_ms = event.get("duration_api_ms", 0)
@@ -362,50 +342,11 @@ class ClaudeOrchestrator:
                     result_cost_usd = event.get("total_cost_usd")
                     result_num_turns = event.get("num_turns")
                     result_usage = event.get("usage")
+                else:
+                    if print_events:
+                        printer.print_event(event)
 
             proc.wait()
-
-            # Print completion — stream gets full banner, batch gets one-liner
-            if stream:
-                printer.print_result_banner(
-                    duration_ms=result_duration_ms,
-                    cost_usd=result_cost_usd,
-                    session_id=result_session_id,
-                    num_turns=result_num_turns,
-                    usage=result_usage,
-                )
-            else:
-                parts = [f"Done ({result_duration_ms / 1000:.1f}s)"]
-                if result_cost_usd is not None:
-                    parts.append(f"${result_cost_usd:.4f}")
-                if result_num_turns is not None:
-                    parts.append(f"{result_num_turns} turns")
-                if result_usage:
-                    inp = result_usage.get("input_tokens", 0)
-                    out = result_usage.get("output_tokens", 0)
-                    cache_read = result_usage.get("cache_read_input_tokens", 0)
-                    cache_write = result_usage.get("cache_creation_input_tokens", 0)
-                    token_parts = [f"{printer._fmt_tokens(inp)} in", f"{printer._fmt_tokens(out)} out"]
-                    if cache_read:
-                        token_parts.append(f"{printer._fmt_tokens(cache_read)} cached")
-                    if cache_write:
-                        token_parts.append(f"{printer._fmt_tokens(cache_write)} cache-write")
-                    parts.append(" + ".join(token_parts))
-                ts = printer.timestamp()
-                print(
-                    f"{printer.DIM}[{ts}]{printer.RESET} "
-                    f"{printer.BOLD}CCFlow{printer.RESET} "
-                    + "  │  ".join(parts),
-                    flush=True,
-                )
-                if result_session_id:
-                    ts = printer.timestamp()
-                    print(
-                        f"{printer.DIM}[{ts}]{printer.RESET} "
-                        f"{printer.BOLD}CCFlow{printer.RESET} "
-                        f"Session: {result_session_id}",
-                        flush=True,
-                    )
 
             if proc.returncode != 0 and result_output is None:
                 return ClaudeResult(
@@ -414,7 +355,7 @@ class ClaudeOrchestrator:
                     session_id=result_session_id,
                 )
 
-            cr = ClaudeResult(
+            return ClaudeResult(
                 success=True,
                 output=result_output,
                 duration_ms=result_duration_ms,
@@ -425,19 +366,6 @@ class ClaudeOrchestrator:
                 usage=result_usage,
             )
 
-            # Write output to disk if configured
-            output_path = self._write_output(cr)
-            if output_path:
-                ts = printer.timestamp()
-                print(
-                    f"{printer.DIM}[{ts}]{printer.RESET} "
-                    f"{printer.BOLD}CCFlow{printer.RESET} "
-                    f"Output saved: {output_path}",
-                    flush=True,
-                )
-
-            return cr
-
         except FileNotFoundError:
             return ClaudeResult(
                 success=False,
@@ -445,9 +373,60 @@ class ClaudeOrchestrator:
             )
         except Exception as e:
             return ClaudeResult(success=False, error=str(e))
-        finally:
-            if log_file:
-                log_file.close()
+
+    def _print_batch_summary(self, result: ClaudeResult) -> None:
+        """Print a one-liner batch summary (duration, cost, turns, tokens, session)."""
+        parts = [f"Done ({result.duration_ms / 1000:.1f}s)"]
+        if result.cost_usd is not None:
+            parts.append(f"${result.cost_usd:.4f}")
+        if result.num_turns is not None:
+            parts.append(f"{result.num_turns} turns")
+        if result.usage:
+            inp = result.usage.get("input_tokens", 0)
+            out = result.usage.get("output_tokens", 0)
+            cache_read = result.usage.get("cache_read_input_tokens", 0)
+            cache_write = result.usage.get("cache_creation_input_tokens", 0)
+            token_parts = [f"{printer._fmt_tokens(inp)} in", f"{printer._fmt_tokens(out)} out"]
+            if cache_read:
+                token_parts.append(f"{printer._fmt_tokens(cache_read)} cached")
+            if cache_write:
+                token_parts.append(f"{printer._fmt_tokens(cache_write)} cache-write")
+            parts.append(" + ".join(token_parts))
+        ts = printer.timestamp()
+        print(
+            f"{printer.DIM}[{ts}]{printer.RESET} "
+            f"{printer.BOLD}CCFlow{printer.RESET} "
+            + "  │  ".join(parts),
+            flush=True,
+        )
+        if result.session_id:
+            ts = printer.timestamp()
+            print(
+                f"{printer.DIM}[{ts}]{printer.RESET} "
+                f"{printer.BOLD}CCFlow{printer.RESET} "
+                f"Session: {result.session_id}",
+                flush=True,
+            )
+
+    def _print_output_saved(self, output_path: str) -> None:
+        """Print notification that output was saved to disk."""
+        ts = printer.timestamp()
+        print(
+            f"{printer.DIM}[{ts}]{printer.RESET} "
+            f"{printer.BOLD}CCFlow{printer.RESET} "
+            f"Output saved: {output_path}",
+            flush=True,
+        )
+
+    @staticmethod
+    def _accumulate_usage(totals: dict, round_usage: dict | None) -> dict:
+        """Merge a round's usage dict into a running totals dict."""
+        if not round_usage:
+            return totals
+        for key in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                    "cache_creation_input_tokens"):
+            totals[key] = totals.get(key, 0) + round_usage.get(key, 0)
+        return totals
 
     # ── public API ───────────────────────────────────────────
 
@@ -464,15 +443,37 @@ class ClaudeOrchestrator:
         Returns:
             A ``ClaudeResult`` containing the final output and session metadata.
         """
-        return self._execute(prompt, stream=False)
+        _, log_file = self._open_log()
+        try:
+            ts = printer.timestamp()
+            print(
+                f"{printer.DIM}[{ts}]{printer.RESET} "
+                f"{printer.BOLD}CCFlow{printer.RESET} "
+                f"Running ({self.model})...",
+                flush=True,
+            )
+
+            result = self._call(prompt, log_file=log_file, print_events=False, print_banner=False)
+            self._print_batch_summary(result)
+
+            if result.success and result.output:
+                print(f"\n{result.output}", flush=True)
+
+            output_path = self._write_output(result)
+            if output_path:
+                self._print_output_saved(output_path)
+
+            return result
+        finally:
+            if log_file:
+                log_file.close()
 
     def run_stream(self, prompt: str) -> ClaudeResult:
         """Run Claude in stream mode with real-time formatted output.
 
         Prints events as they arrive in Claude Code CLI style:
-        session banner, assistant text, tool calls (``⏺``), tool results
-        (``⎿``), thinking indicators, and a result banner at the end with
-        duration, cost, turns, token breakdown, and session ID.
+        session banner, assistant text, tool calls, tool results,
+        thinking indicators, and a result banner at the end.
 
         Args:
             prompt: The prompt text to send to Claude.
@@ -480,4 +481,141 @@ class ClaudeOrchestrator:
         Returns:
             A ``ClaudeResult`` containing the final output and session metadata.
         """
-        return self._execute(prompt, stream=True)
+        _, log_file = self._open_log()
+        try:
+            result = self._call(prompt, log_file=log_file, print_events=True, print_banner=True)
+
+            if result.success:
+                printer.print_result_banner(
+                    duration_ms=result.duration_ms,
+                    cost_usd=result.cost_usd,
+                    session_id=result.session_id,
+                    num_turns=result.num_turns,
+                    usage=result.usage,
+                )
+
+            output_path = self._write_output(result)
+            if output_path:
+                self._print_output_saved(output_path)
+
+            return result
+        finally:
+            if log_file:
+                log_file.close()
+
+    def run_conversation(self, initial_prompt: str | None = None) -> list[ClaudeResult]:
+        """Run an interactive multi-round conversation session.
+
+        Opens one log file for the entire conversation. Prints the session
+        banner on the first round only. Accumulates duration, cost, turns,
+        and token usage across all rounds. Prints one aggregated summary
+        at the end.
+
+        The loop ends when the user types ``exit``, ``quit``, an empty line,
+        or sends EOF (Ctrl-D).
+
+        Args:
+            initial_prompt: First prompt to send. If None, prompts interactively.
+
+        Returns:
+            List of ``ClaudeResult`` objects, one per round.
+        """
+        results: list[ClaudeResult] = []
+        _, log_file = self._open_log()
+
+        try:
+            # Accumulation state
+            total_duration_ms = 0
+            total_cost_usd = 0.0
+            total_num_turns = 0
+            total_usage: dict = {}
+
+            # ── First round ──
+            prompt = initial_prompt
+            if not prompt:
+                try:
+                    prompt = input(f"{printer.BOLD}You:{printer.RESET} ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return results
+                if not prompt:
+                    return results
+
+            result = self._call(
+                prompt, log_file=log_file, print_events=True, print_banner=True,
+            )
+            results.append(result)
+
+            total_duration_ms += result.duration_ms
+            if result.cost_usd is not None:
+                total_cost_usd += result.cost_usd
+            if result.num_turns is not None:
+                total_num_turns += result.num_turns
+            total_usage = self._accumulate_usage(total_usage, result.usage)
+
+            if not result.success or not result.session_id:
+                printer.print_result_banner(
+                    duration_ms=total_duration_ms,
+                    cost_usd=total_cost_usd or None,
+                    session_id=result.session_id,
+                    num_turns=total_num_turns or None,
+                    usage=total_usage or None,
+                    title="Conversation Complete",
+                    extra_lines=[f"Rounds: {len(results)}"],
+                )
+                return results
+
+            orig_resume = self.resume_session
+
+            # ── Subsequent rounds ──
+            while True:
+                print()
+                try:
+                    user_input = input(f"{printer.BOLD}You:{printer.RESET} ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if not user_input or user_input.lower() in ("exit", "quit"):
+                    break
+
+                self.resume_session = result.session_id
+                result = self._call(
+                    user_input, log_file=log_file, print_events=True, print_banner=False,
+                )
+                results.append(result)
+
+                total_duration_ms += result.duration_ms
+                if result.cost_usd is not None:
+                    total_cost_usd += result.cost_usd
+                if result.num_turns is not None:
+                    total_num_turns += result.num_turns
+                total_usage = self._accumulate_usage(total_usage, result.usage)
+
+                if not result.success:
+                    break
+
+            self.resume_session = orig_resume
+
+            # One aggregated summary
+            final_session_id = results[-1].session_id if results else None
+            printer.print_result_banner(
+                duration_ms=total_duration_ms,
+                cost_usd=total_cost_usd or None,
+                session_id=final_session_id,
+                num_turns=total_num_turns or None,
+                usage=total_usage or None,
+                title="Conversation Complete",
+                extra_lines=[f"Rounds: {len(results)}"],
+            )
+
+            # Write output from last successful round
+            if results:
+                output_path = self._write_output(results[-1])
+                if output_path:
+                    self._print_output_saved(output_path)
+
+            return results
+
+        finally:
+            if log_file:
+                log_file.close()
