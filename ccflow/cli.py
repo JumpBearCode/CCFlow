@@ -15,6 +15,7 @@ def main() -> None:
     parser.add_argument("--danger", action="store_true", help="Dangerously skip all permission checks")
     parser.add_argument("-r", "--resume", metavar="SESSION_ID", help="Resume a previous session by ID")
     parser.add_argument("-c", "--continue", dest="continue_session", action="store_true", help="Continue the most recent session")
+    parser.add_argument("-i", "--chat", action="store_true", help="Interactive multi-round conversation")
     parser.add_argument("--allowed-tools", nargs="*", help="Allowed tools list")
     parser.add_argument("--log-dir", default="logs", help="Log directory (default: logs)")
     parser.add_argument("--output-dir", help="Save result output to this directory as .md files")
@@ -26,12 +27,12 @@ def main() -> None:
     prompt = args.prompt
     if not prompt:
         if sys.stdin.isatty():
-            if not args.resume and not args.continue_session:
+            if not args.resume and not args.continue_session and not args.chat:
                 parser.error("Provide a prompt as argument or pipe via stdin")
-            prompt = ""  # resume/continue can work with empty prompt
+            prompt = ""  # resume/continue/chat can work with empty prompt
         else:
             prompt = sys.stdin.read().strip()
-    if not prompt and not args.resume and not args.continue_session:
+    if not prompt and not args.resume and not args.continue_session and not args.chat:
         parser.error("Empty prompt")
 
     orc = ClaudeOrchestrator(
@@ -47,17 +48,26 @@ def main() -> None:
         max_budget_usd=args.max_budget,
     )
 
-    if args.batch:
+    if args.chat:
+        results = orc.run_conversation(prompt if prompt else None)
+        if not results:
+            sys.exit(0)
+        last = results[-1]
+        if not last.success:
+            print(f"\nError: {last.error}", file=sys.stderr)
+            sys.exit(1)
+    elif args.batch:
         result = orc.run(prompt)
+        if not result.success:
+            print(f"\nError: {result.error}", file=sys.stderr)
+            sys.exit(1)
+        if result.output:
+            print(f"\n{result.output}")
     else:
         result = orc.run_stream(prompt)
-
-    if not result.success:
-        print(f"\nError: {result.error}", file=sys.stderr)
-        sys.exit(1)
-
-    if args.batch and result.output:
-        print(f"\n{result.output}")
+        if not result.success:
+            print(f"\nError: {result.error}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

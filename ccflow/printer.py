@@ -110,6 +110,9 @@ def print_result_banner(
     session_id: str | None,
     num_turns: int | None,
     usage: dict | None = None,
+    *,
+    title: str = "Session Complete",
+    extra_lines: list[str] | None = None,
 ) -> None:
     """Print session complete banner with optional token usage."""
     parts: list[str] = []
@@ -120,8 +123,9 @@ def print_result_banner(
         parts.append(f"Turns: {num_turns}")
     stats = "  │  ".join(parts)
 
+    padding = BANNER_WIDTH - len(title) - 4
     print(flush=True)
-    _ts_print(f"{DIM}╭─{RESET} {BOLD}Session Complete{RESET} {DIM}{'─' * (BANNER_WIDTH - 19)}{RESET}")
+    _ts_print(f"{DIM}╭─{RESET} {BOLD}{title}{RESET} {DIM}{'─' * padding}{RESET}")
     _ts_print(f"{DIM}│{RESET}  {stats}")
 
     # Per-run token breakdown
@@ -136,6 +140,10 @@ def print_result_banner(
         if cache_write:
             token_parts.append(f"{_fmt_tokens(cache_write)} cache-write")
         _ts_print(f"{DIM}│{RESET}  Tokens: {' + '.join(token_parts)}")
+
+    if extra_lines:
+        for line in extra_lines:
+            _ts_print(f"{DIM}│{RESET}  {line}")
 
     if session_id:
         _ts_print(f"{DIM}│{RESET}  Session: {session_id}")
