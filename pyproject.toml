@@ -7,7 +7,7 @@ name = "ccflow"
 version = "0.1.0"
 description = "Claude Code orchestrator — reusable wrapper around `claude -p` CLI"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["python-telegram-bot>=21.0", "python-dotenv>=1.0"]
 
 [project.scripts]
 ccflow = "ccflow.cli:main"
