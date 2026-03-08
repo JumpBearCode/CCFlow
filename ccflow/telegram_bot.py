@@ -1,8 +1,10 @@
 """Telegram bot that forwards messages to ClaudeOrchestrator and sends responses back."""
 
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import argparse
 import asyncio
@@ -204,7 +206,7 @@ class TelegramBot:
     """Telegram bot that bridges messages to ClaudeOrchestrator.
 
     Each Telegram chat maintains its own Claude session for multi-turn
-    conversations. Sessions are automatically reaped after idle timeout.
+    conversations. Sessions persist until the user sends /reset.
     """
 
     def __init__(
@@ -218,7 +220,6 @@ class TelegramBot:
         max_budget_usd: float | None = None,
         cwd: str | None = None,
         log_dir: str | None = None,
-        session_timeout: int = 180,
         subprocess_timeout: int = 300,
         output_format: str = "streaming",
     ) -> None:
@@ -230,7 +231,6 @@ class TelegramBot:
         self.max_budget_usd = max_budget_usd
         self.cwd = cwd
         self.log_dir = log_dir
-        self.session_timeout = session_timeout
         self.subprocess_timeout = subprocess_timeout
         self.output_format = output_format
         self.sessions: dict[int, ChatSession] = {}
@@ -255,20 +255,6 @@ class TelegramBot:
             log_dir=self.log_dir,
             cwd=self.cwd,
         )
-
-    async def _session_reaper(self) -> None:
-        """Background task that removes idle sessions."""
-        while True:
-            await asyncio.sleep(60)
-            now = time.monotonic()
-            expired = [
-                cid
-                for cid, s in self.sessions.items()
-                if not s.busy and (now - s.last_active) > self.session_timeout
-            ]
-            for cid in expired:
-                logger.info("Reaping idle session for chat %d", cid)
-                del self.sessions[cid]
 
     async def _handle_start(self, update, context) -> None:
         await update.message.reply_text(
@@ -354,6 +340,7 @@ class TelegramBot:
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(self._keep_typing(chat_id, context.bot, stop_typing))
 
+        orc: ClaudeOrchestrator | None = None
         try:
             orc = self._make_orchestrator(session)
 
@@ -362,10 +349,12 @@ class TelegramBot:
             else:
                 result = await self._run_batch(orc, text)
 
-            session.last_active = time.monotonic()
-
             if result.success and result.session_id:
                 session.session_id = result.session_id
+            elif not result.success and session.session_id:
+                # Resume failed (e.g. stale session) — clear so next message starts fresh
+                logger.warning("Resume failed for session %s, clearing", session.session_id)
+                session.session_id = None
 
             if result.success and result.output:
                 for chunk in _split_message(result.output):
@@ -380,6 +369,11 @@ class TelegramBot:
                 await update.message.reply_text(f"Error: {result.error}")
 
         except asyncio.TimeoutError:
+            # Kill the orphan claude subprocess
+            proc = getattr(orc, "_proc", None)
+            if proc is not None:
+                proc.kill()
+                proc.wait()
             await update.message.reply_text(
                 f"Timed out after {self.subprocess_timeout}s. Try a simpler prompt or increase the timeout."
             )
@@ -389,6 +383,7 @@ class TelegramBot:
         finally:
             stop_typing.set()
             await typing_task
+            session.last_active = time.monotonic()
             session.busy = False
 
     async def _run_batch(self, orc: ClaudeOrchestrator, text: str):
@@ -471,11 +466,6 @@ class TelegramBot:
         app.add_handler(CommandHandler("status", self._handle_status))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
-        async def post_init(application) -> None:
-            application.create_task(self._session_reaper())
-
-        app.post_init = post_init
-
         logger.info("Starting CCFlow Telegram bot (model=%s, danger=%s)", self.model, self.danger)
         print(f"CCFlow Telegram bot started (model={self.model})")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
@@ -490,7 +480,6 @@ def bot_main(args: list[str]) -> None:
     parser.add_argument("--max-budget", type=float, help="Max budget in USD per invocation")
     parser.add_argument("--cwd", help="Working directory for claude subprocess")
     parser.add_argument("--log-dir", default="logs", help="Log directory (default: logs)")
-    parser.add_argument("--session-timeout", type=int, default=180, help="Session idle timeout in seconds (default: 180)")
     parser.add_argument("--subprocess-timeout", type=int, default=300, help="Max time per Claude call in seconds (default: 300)")
     parsed = parser.parse_args(args)
 
@@ -527,7 +516,6 @@ def bot_main(args: list[str]) -> None:
         max_budget_usd=parsed.max_budget,
         cwd=parsed.cwd,
         log_dir=parsed.log_dir,
-        session_timeout=parsed.session_timeout,
         subprocess_timeout=subprocess_timeout,
         output_format=output_format,
     )

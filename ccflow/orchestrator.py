@@ -301,6 +301,7 @@ class ClaudeOrchestrator:
                 env=env,
                 cwd=self.cwd,
             )
+            self._proc = proc
 
             proc.stdin.write(prompt)
             proc.stdin.close()
