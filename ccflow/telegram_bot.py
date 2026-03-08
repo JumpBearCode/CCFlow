@@ -1,5 +1,9 @@
 """Telegram bot that forwards messages to ClaudeOrchestrator and sends responses back."""
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import argparse
 import asyncio
 import html
@@ -11,7 +15,7 @@ from dataclasses import dataclass, field
 
 from ccflow import ClaudeOrchestrator
 from ccflow.event_formatter import format_event
-from ccflow.printer import shorten
+from ccflow.printer import format_tool_input, shorten
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +23,17 @@ logger = logging.getLogger(__name__)
 _TG_MIN_INTERVAL = 1.0
 
 _TOOL_EMOJIS: dict[str, str] = {
-    "Bash": "\u2328\ufe0f",       # ⌨️
-    "Read": "\ud83d\udcc4",       # 📄
-    "Write": "\u270f\ufe0f",      # ✏️
-    "Edit": "\u270f\ufe0f",       # ✏️
-    "Glob": "\ud83d\udd0d",       # 🔍
-    "Grep": "\ud83d\udd0d",       # 🔍
-    "Agent": "\ud83e\udd16",      # 🤖
-    "WebSearch": "\ud83c\udf10",  # 🌐
-    "WebFetch": "\ud83c\udf10",   # 🌐
+    "Bash": "\u2328\ufe0f",        # ⌨️
+    "Read": "\U0001F4C4",          # 📄
+    "Write": "\u270f\ufe0f",       # ✏️
+    "Edit": "\u270f\ufe0f",        # ✏️
+    "Glob": "\U0001F50D",          # 🔍
+    "Grep": "\U0001F50D",          # 🔍
+    "Agent": "\U0001F916",         # 🤖
+    "WebSearch": "\U0001F310",     # 🌐
+    "WebFetch": "\U0001F310",      # 🌐
 }
-_DEFAULT_TOOL_EMOJI = "\ud83d\udee0\ufe0f"  # 🛠️
+_DEFAULT_TOOL_EMOJI = "\U0001F6E0\ufe0f"   # 🛠️
 
 
 def _tool_emoji(name: str) -> str:
@@ -37,15 +41,16 @@ def _tool_emoji(name: str) -> str:
     return _TOOL_EMOJIS.get(name, _DEFAULT_TOOL_EMOJI)
 
 
-def _event_to_telegram(event: dict) -> tuple[str, str] | None:
-    """Classify an event into (category, formatted_text) for Telegram.
+def _event_to_telegram(event: dict) -> list[tuple[str, str]]:
+    """Classify an event into a list of (category, formatted_text) pairs for Telegram.
 
-    Categories: "tool", "tool_done", "tool_error", "text", "thinking", "status".
-    Returns None if the event should be suppressed.
+    Categories: "tool", "tool_done", "tool_error", "text", "thinking", "result", "status".
+    Returns an empty list if the event should be suppressed entirely.
     """
     etype = event.get("type", "")
 
     if etype == "assistant":
+        items: list[tuple[str, str]] = []
         message = event.get("message", {})
         for block in message.get("content", []):
             block_type = block.get("type", "")
@@ -53,21 +58,26 @@ def _event_to_telegram(event: dict) -> tuple[str, str] | None:
             if block_type == "tool_use":
                 name = block.get("name", "?")
                 emoji = _tool_emoji(name)
-                formatted = format_event(event)
-                if formatted and formatted.startswith("Tool: "):
-                    # Replace "Tool: Name  params" with emoji version
-                    return ("tool", f"{emoji} {formatted}")
-                return ("tool", f"{emoji} Tool: {name}")
+                tool_input = block.get("input", {})
+                params = format_tool_input(tool_input)
+                if params:
+                    items.append(("tool", f"{emoji} Tool: {name}  {params}"))
+                else:
+                    items.append(("tool", f"{emoji} Tool: {name}"))
 
-            if block_type == "thinking":
-                return ("thinking", "\ud83d\udca1 Thinking...")
+            elif block_type == "thinking":
+                thinking_text = block.get("thinking", "").strip()
+                if thinking_text:
+                    items.append(("thinking", f"\U0001F4A1 {shorten(thinking_text, 300)}"))
+                else:
+                    items.append(("thinking", "\U0001F4A1 Thinking..."))
 
-            if block_type == "text":
+            elif block_type == "text":
                 text = block.get("text", "").strip()
                 if text:
-                    return ("text", text)
+                    items.append(("text", text))
 
-        return None
+        return items
 
     if etype == "user":
         message = event.get("message", {})
@@ -75,23 +85,37 @@ def _event_to_telegram(event: dict) -> tuple[str, str] | None:
             if block.get("type") == "tool_result":
                 if block.get("is_error", False):
                     content = block.get("content", "")
-                    return ("tool_error", f"\u274c Error: {shorten(str(content), 150)}")
-                return ("tool_done", "\u2705 Done")
-        return None
+                    return [("tool_error", f"\u274c Error: {shorten(str(content), 150)}")]
+                return [("tool_done", "\u2705 Done")]
+        return []
 
     if etype == "system" and event.get("subtype") == "init":
-        return ("status", format_event(event) or "Session started")
+        return [("status", format_event(event) or "Session started")]
 
     if etype == "result":
-        return ("status", format_event(event) or "Completed")
+        duration_s = event.get("duration_ms", 0) / 1000
+        cost = event.get("total_cost_usd")
+        num_turns = event.get("num_turns")
+        usage = event.get("usage", {}) or {}
+        inp = usage.get("input_tokens", 0)
+        out = usage.get("output_tokens", 0)
+
+        parts = [f"{duration_s:.1f}s"]
+        if cost is not None:
+            parts.append(f"${cost:.4f}")
+        if num_turns is not None:
+            parts.append(f"{num_turns} turns")
+        if inp or out:
+            parts.append(f"{inp}in/{out}out")
+        return [("result", f"\u2705 Completed ({' | '.join(parts)})")]
 
     if etype == "rate_limit_event":
         formatted = format_event(event)
         if formatted:
-            return ("status", f"\u26a0\ufe0f {formatted}")
-        return None
+            return [("status", f"\u26a0\ufe0f {formatted}")]
+        return []
 
-    return None
+    return []
 
 
 @dataclass
@@ -196,6 +220,7 @@ class TelegramBot:
         log_dir: str | None = None,
         session_timeout: int = 180,
         subprocess_timeout: int = 300,
+        output_format: str = "streaming",
     ) -> None:
         self.token = token
         self.allowed_users = allowed_users
@@ -207,6 +232,7 @@ class TelegramBot:
         self.log_dir = log_dir
         self.session_timeout = session_timeout
         self.subprocess_timeout = subprocess_timeout
+        self.output_format = output_format
         self.sessions: dict[int, ChatSession] = {}
 
     def _is_authorized(self, user_id: int) -> bool:
@@ -324,75 +350,17 @@ class TelegramBot:
 
         session.busy = True
 
-        # Start continuous typing indicator
+        # Start continuous typing indicator (always active regardless of output_format)
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(self._keep_typing(chat_id, context.bot, stop_typing))
 
         try:
             orc = self._make_orchestrator(session)
-            loop = asyncio.get_running_loop()
-            queue: asyncio.Queue[dict | None] = asyncio.Queue()
 
-            def on_event(event: dict) -> None:
-                loop.call_soon_threadsafe(queue.put_nowait, event)
-
-            async def send_events() -> None:
-                """Consumer: read events from queue and send status to Telegram."""
-                last_send = 0.0
-                thinking_sent = False
-
-                while True:
-                    event = await queue.get()
-                    if event is None:
-                        break  # sentinel — producer is done
-
-                    classified = _event_to_telegram(event)
-                    if classified is None:
-                        continue
-
-                    category, formatted_text = classified
-
-                    # Suppress categories that add noise
-                    if category == "tool_done":
-                        continue
-                    if category == "text":
-                        continue  # final output sent from result.output
-                    if category == "status":
-                        continue  # init/result suppressed during streaming
-
-                    # Deduplicate thinking
-                    if category == "thinking":
-                        if thinking_sent:
-                            continue
-                        thinking_sent = True
-                    else:
-                        # Reset thinking dedup when a non-thinking event arrives
-                        thinking_sent = False
-
-                    # Rate limit: wait if needed
-                    now = time.monotonic()
-                    elapsed = now - last_send
-                    if elapsed < _TG_MIN_INTERVAL:
-                        await asyncio.sleep(_TG_MIN_INTERVAL - elapsed)
-
-                    try:
-                        await update.message.reply_text(formatted_text)
-                    except Exception:
-                        logger.debug("Failed to send status message: %s", formatted_text)
-
-                    last_send = time.monotonic()
-
-            consumer_task = asyncio.create_task(send_events())
-
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(orc.run, text, on_event=on_event),
-                    timeout=self.subprocess_timeout,
-                )
-            finally:
-                # Signal consumer to exit
-                queue.put_nowait(None)
-                await consumer_task
+            if self.output_format == "streaming":
+                result = await self._run_streaming(orc, text, update)
+            else:
+                result = await self._run_batch(orc, text)
 
             session.last_active = time.monotonic()
 
@@ -422,6 +390,68 @@ class TelegramBot:
             stop_typing.set()
             await typing_task
             session.busy = False
+
+    async def _run_batch(self, orc: ClaudeOrchestrator, text: str):
+        """Batch mode: block until done, return result. No intermediate messages."""
+        return await asyncio.wait_for(
+            asyncio.to_thread(orc.run, text),
+            timeout=self.subprocess_timeout,
+        )
+
+    async def _run_streaming(self, orc: ClaudeOrchestrator, text: str, update):
+        """Streaming mode: send tool calls, thinking, and result status in real-time."""
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+        def on_event(event: dict) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+
+        async def send_events() -> None:
+            last_send = 0.0
+            thinking_sent = False
+
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+
+                items = _event_to_telegram(event)
+
+                for category, formatted_text in items:
+                    if category in ("tool_done", "text", "status"):
+                        continue
+
+                    if category == "thinking":
+                        if thinking_sent:
+                            continue
+                        thinking_sent = True
+                    else:
+                        thinking_sent = False
+
+                    now = time.monotonic()
+                    elapsed = now - last_send
+                    if elapsed < _TG_MIN_INTERVAL:
+                        await asyncio.sleep(_TG_MIN_INTERVAL - elapsed)
+
+                    try:
+                        await update.message.reply_text(formatted_text)
+                    except Exception:
+                        logger.debug("Failed to send status message: %s", formatted_text)
+
+                    last_send = time.monotonic()
+
+        consumer_task = asyncio.create_task(send_events())
+
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(orc.run, text, on_event=on_event),
+                timeout=self.subprocess_timeout,
+            )
+        finally:
+            queue.put_nowait(None)
+            await consumer_task
+
+        return result
 
     def start(self) -> None:
         """Build the Telegram application and start polling."""
@@ -474,6 +504,15 @@ def bot_main(args: list[str]) -> None:
     if users_env:
         allowed_users = {int(uid.strip()) for uid in users_env.split(",") if uid.strip()}
 
+    subprocess_timeout = parsed.subprocess_timeout
+    timeout_env = os.environ.get("CLAUDE_SUBPROCESS_TIMEOUT")
+    if timeout_env and not any(a.startswith("--subprocess-timeout") for a in args):
+        subprocess_timeout = int(timeout_env)
+
+    output_format = os.environ.get("OUTPUT_FORMAT", "streaming").lower()
+    if output_format not in ("streaming", "batch"):
+        output_format = "streaming"
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -489,6 +528,7 @@ def bot_main(args: list[str]) -> None:
         cwd=parsed.cwd,
         log_dir=parsed.log_dir,
         session_timeout=parsed.session_timeout,
-        subprocess_timeout=parsed.subprocess_timeout,
+        subprocess_timeout=subprocess_timeout,
+        output_format=output_format,
     )
     bot.start()
