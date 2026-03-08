@@ -2,8 +2,10 @@
 
 import argparse
 import asyncio
+import html
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -38,6 +40,60 @@ def _split_message(text: str, max_len: int = 4096) -> list[str]:
         chunks.append(text[:split_at])
         text = text[split_at:].lstrip("\n")
     return chunks
+
+
+def _markdown_to_telegram_html(text: str) -> str:
+    """Convert standard Markdown to Telegram-compatible HTML.
+
+    Handles fenced code blocks, inline code, bold, italic,
+    strikethrough, headers, and links.
+    """
+    # 1. Stash fenced code blocks so inner content is not processed.
+    code_blocks: list[str] = []
+
+    def _stash_code_block(m: re.Match) -> str:
+        lang = m.group(1) or ""
+        code = html.escape(m.group(2).strip("\n"))
+        if lang:
+            code_blocks.append(
+                f'<pre><code class="language-{lang}">{code}</code></pre>'
+            )
+        else:
+            code_blocks.append(f"<pre>{code}</pre>")
+        return f"\x00CB{len(code_blocks) - 1}\x00"
+
+    text = re.sub(r"```(\w*)\n?(.*?)```", _stash_code_block, text, flags=re.DOTALL)
+
+    # 2. Stash inline code spans.
+    inline_codes: list[str] = []
+
+    def _stash_inline(m: re.Match) -> str:
+        inline_codes.append(f"<code>{html.escape(m.group(1))}</code>")
+        return f"\x00IC{len(inline_codes) - 1}\x00"
+
+    text = re.sub(r"`([^`]+)`", _stash_inline, text)
+
+    # 3. Escape HTML entities in the remaining (non-code) text.
+    text = html.escape(text)
+
+    # 4. Bold: **text**
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    # 5. Italic: *text* (not adjacent to word characters)
+    text = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"<i>\1</i>", text)
+    # 6. Strikethrough: ~~text~~
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+    # 7. Headers: # … → bold line
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+    # 8. Links: [text](url)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+
+    # 9. Restore stashed blocks.
+    for i, block in enumerate(code_blocks):
+        text = text.replace(f"\x00CB{i}\x00", block)
+    for i, code in enumerate(inline_codes):
+        text = text.replace(f"\x00IC{i}\x00", code)
+
+    return text
 
 
 class TelegramBot:
@@ -189,7 +245,11 @@ class TelegramBot:
 
             if result.success and result.output:
                 for chunk in _split_message(result.output):
-                    await update.message.reply_text(chunk)
+                    formatted = _markdown_to_telegram_html(chunk)
+                    try:
+                        await update.message.reply_text(formatted, parse_mode="HTML")
+                    except Exception:
+                        await update.message.reply_text(chunk)
             elif result.success:
                 await update.message.reply_text("(Claude returned no output)")
             else:
