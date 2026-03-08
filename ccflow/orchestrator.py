@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -265,6 +266,7 @@ class ClaudeOrchestrator:
         log_file: IO[str] | None = None,
         print_events: bool = False,
         print_banner: bool = False,
+        on_event: Callable[[dict], None] | None = None,
     ) -> ClaudeResult:
         """Core execution: spawn ``claude -p``, parse events, return result.
 
@@ -279,6 +281,9 @@ class ClaudeOrchestrator:
             print_events: If True, print streaming events via ``printer.print_event()``.
             print_banner: If True (and ``print_events`` is True), allow the
                 ``system:init`` event to trigger the session banner.
+            on_event: Optional callback invoked with each parsed JSON event
+                dict. Called before type dispatch. Exceptions are silently
+                swallowed so a buggy callback cannot crash the parse loop.
 
         Returns:
             A ``ClaudeResult`` with all extracted metadata.
@@ -327,6 +332,12 @@ class ClaudeOrchestrator:
                             flush=True,
                         )
                     continue
+
+                if on_event is not None:
+                    try:
+                        on_event(event)
+                    except Exception:
+                        pass  # never let callback crash the parse loop
 
                 etype = event.get("type", "")
 
@@ -430,7 +441,12 @@ class ClaudeOrchestrator:
 
     # ── public API ───────────────────────────────────────────
 
-    def run(self, prompt: str) -> ClaudeResult:
+    def run(
+        self,
+        prompt: str,
+        *,
+        on_event: Callable[[dict], None] | None = None,
+    ) -> ClaudeResult:
         """Run Claude in batch mode.
 
         Prints a single "Running..." line at the start and a summary line at
@@ -439,6 +455,7 @@ class ClaudeOrchestrator:
 
         Args:
             prompt: The prompt text to send to Claude.
+            on_event: Optional callback invoked with each parsed event dict.
 
         Returns:
             A ``ClaudeResult`` containing the final output and session metadata.
@@ -453,7 +470,7 @@ class ClaudeOrchestrator:
                 flush=True,
             )
 
-            result = self._call(prompt, log_file=log_file, print_events=False, print_banner=False)
+            result = self._call(prompt, log_file=log_file, print_events=False, print_banner=False, on_event=on_event)
             self._print_batch_summary(result)
 
             if result.success and result.output:
@@ -468,7 +485,12 @@ class ClaudeOrchestrator:
             if log_file:
                 log_file.close()
 
-    def run_stream(self, prompt: str) -> ClaudeResult:
+    def run_stream(
+        self,
+        prompt: str,
+        *,
+        on_event: Callable[[dict], None] | None = None,
+    ) -> ClaudeResult:
         """Run Claude in stream mode with real-time formatted output.
 
         Prints events as they arrive in Claude Code CLI style:
@@ -477,13 +499,14 @@ class ClaudeOrchestrator:
 
         Args:
             prompt: The prompt text to send to Claude.
+            on_event: Optional callback invoked with each parsed event dict.
 
         Returns:
             A ``ClaudeResult`` containing the final output and session metadata.
         """
         _, log_file = self._open_log()
         try:
-            result = self._call(prompt, log_file=log_file, print_events=True, print_banner=True)
+            result = self._call(prompt, log_file=log_file, print_events=True, print_banner=True, on_event=on_event)
 
             if result.success:
                 printer.print_result_banner(
@@ -503,7 +526,12 @@ class ClaudeOrchestrator:
             if log_file:
                 log_file.close()
 
-    def run_conversation(self, initial_prompt: str | None = None) -> list[ClaudeResult]:
+    def run_conversation(
+        self,
+        initial_prompt: str | None = None,
+        *,
+        on_event: Callable[[dict], None] | None = None,
+    ) -> list[ClaudeResult]:
         """Run an interactive multi-round conversation session.
 
         Opens one log file for the entire conversation. Prints the session
@@ -516,6 +544,7 @@ class ClaudeOrchestrator:
 
         Args:
             initial_prompt: First prompt to send. If None, prompts interactively.
+            on_event: Optional callback invoked with each parsed event dict.
 
         Returns:
             List of ``ClaudeResult`` objects, one per round.
@@ -542,7 +571,7 @@ class ClaudeOrchestrator:
                     return results
 
             result = self._call(
-                prompt, log_file=log_file, print_events=True, print_banner=True,
+                prompt, log_file=log_file, print_events=True, print_banner=True, on_event=on_event,
             )
             results.append(result)
 
@@ -580,7 +609,7 @@ class ClaudeOrchestrator:
 
                 self.resume_session = result.session_id
                 result = self._call(
-                    user_input, log_file=log_file, print_events=True, print_banner=False,
+                    user_input, log_file=log_file, print_events=True, print_banner=False, on_event=on_event,
                 )
                 results.append(result)
 
