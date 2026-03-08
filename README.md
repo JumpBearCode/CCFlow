@@ -263,3 +263,85 @@ You: exit
 [09:31:00] │  Session: abc-123-def
 [09:31:00] ╰──────────────────────────────────────────────────────
 ```
+
+## Telegram Bot
+
+CCFlow includes a Telegram bot that bridges messages to Claude. Each chat maintains its own session for multi-turn conversations.
+
+### Setup
+
+**1. Create a `.env` file in the project root:**
+
+```env
+TELEGRAM_BOT_TOKEN=your-bot-token-from-botfather
+TELEGRAM_ALLOWED_USERS=123456789,987654321
+
+# Optional
+OUTPUT_FORMAT=streaming
+CLAUDE_SUBPROCESS_TIMEOUT=300
+ENABLE_TABLE_IMAGE=false
+```
+
+**2. Run the bot:**
+
+```bash
+uv run ccflow bot --danger
+```
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | — | Bot token from [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_ALLOWED_USERS` | No | — | Comma-separated Telegram user IDs. If unset, anyone can use the bot |
+| `OUTPUT_FORMAT` | No | `streaming` | `streaming` (real-time tool calls) or `batch` (wait for full response) |
+| `CLAUDE_SUBPROCESS_TIMEOUT` | No | `300` | Max seconds per Claude invocation |
+| `ENABLE_TABLE_IMAGE` | No | `false` | Render markdown tables as images (requires Playwright setup) |
+
+### Bot Commands
+
+- `/start` — Welcome message
+- `/reset` — Clear session, start fresh
+- `/model <name>` — Switch model (e.g. `sonnet`, `opus`)
+- `/status` — Show current session info
+
+### CLI Flags
+
+```bash
+uv run ccflow bot --danger                    # required: skip permission checks
+uv run ccflow bot --danger -m sonnet          # specify model
+uv run ccflow bot --danger --cwd /path/to/dir # working directory for Claude
+uv run ccflow bot --danger --max-budget 1.0   # budget cap per invocation
+uv run ccflow bot --danger --subprocess-timeout 600
+```
+
+### Table Image Rendering (Optional)
+
+When `ENABLE_TABLE_IMAGE=true`, markdown tables in Claude's output are rendered as PNG images using headless Chromium, then sent as photos. This makes tables readable on mobile.
+
+**Setup:**
+
+```bash
+# 1. Install with table-image extra
+uv add "ccflow[table-image] @ git+https://github.com/JumpBearCode/CCFlow.git"
+# or for local dev:
+uv sync --extra table-image
+
+# 2. Install Chromium (one-time, ~300MB, stored in user cache)
+uv run playwright install chromium
+
+# Linux servers also need system dependencies:
+uv run playwright install-deps chromium
+```
+
+**Docker:**
+
+```dockerfile
+RUN uv sync --extra table-image \
+    && uv run playwright install-deps chromium \
+    && uv run playwright install chromium
+```
+
+Then set `ENABLE_TABLE_IMAGE=true` in your `.env`.
+
+If Playwright is not installed or rendering fails, it falls back to sending the raw table as `<pre>` text.

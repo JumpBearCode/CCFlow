@@ -9,6 +9,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 import argparse
 import asyncio
 import html
+import io
 import logging
 import os
 import re
@@ -202,6 +203,137 @@ def _markdown_to_telegram_html(text: str) -> str:
     return text
 
 
+# Regex: match a markdown table (header + separator + data rows)
+_TABLE_RE = re.compile(
+    r"(\|[^\n]+\|\s*\n"          # header row:    | col1 | col2 |
+    r"\|[-\s:|]+\|\s*\n"         # separator row: |------|------|
+    r"(?:\|[^\n]+\|\s*\n?)+)",   # data rows (one or more)
+)
+
+
+def _parse_table(table_md: str) -> tuple[list[str], list[list[str]]]:
+    """Parse a markdown table string into (headers, rows)."""
+    lines = [ln.strip() for ln in table_md.strip().splitlines() if ln.strip()]
+    def _parse_row(line: str) -> list[str]:
+        # strip leading/trailing pipes, split by |
+        return [cell.strip() for cell in line.strip("|").split("|")]
+    headers = _parse_row(lines[0])
+    # lines[1] is the separator, skip it
+    rows = [_parse_row(ln) for ln in lines[2:]]
+    return headers, rows
+
+
+def _cell_to_html(text: str) -> str:
+    """Convert a markdown table cell to HTML, handling **bold** markers."""
+    parts = re.split(r"(\*\*.+?\*\*)", text)
+    result: list[str] = []
+    for part in parts:
+        if part.startswith("**") and part.endswith("**"):
+            result.append(f"<b>{html.escape(part[2:-2])}</b>")
+        else:
+            result.append(html.escape(part))
+    return "".join(result)
+
+
+def _table_md_to_styled_html(table_md: str) -> str:
+    """Convert a markdown table to a self-contained styled HTML page."""
+    headers, rows = _parse_table(table_md)
+
+    header_cells = "".join(f"<th>{_cell_to_html(h)}</th>" for h in headers)
+    body_rows = []
+    for row in rows:
+        # Pad if shorter than headers
+        while len(row) < len(headers):
+            row.append("")
+        cells = "".join(f"<td>{_cell_to_html(c)}</td>" for c in row)
+        body_rows.append(f"<tr>{cells}</tr>")
+
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
+        "body{margin:0;padding:8px;background:white}"
+        "table{border-collapse:collapse;"
+        'font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,'
+        '"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;'
+        "font-size:15px;white-space:nowrap}"
+        "th,td{border:1px solid #d0d7de;padding:8px 14px;text-align:left}"
+        "th{background:#4a90d9;color:white;font-weight:600}"
+        "tr:nth-child(even){background:#f0f4fa}"
+        "</style></head><body>"
+        f"<table><thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody></table>"
+        "</body></html>"
+    )
+
+
+def _render_table_image(table_md: str) -> io.BytesIO:
+    """Render a markdown table as a PNG image using Playwright (headless Chromium)."""
+    from playwright.sync_api import sync_playwright
+
+    html_content = _table_md_to_styled_html(table_md)
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(html_content, wait_until="networkidle")
+        screenshot_bytes = page.locator("table").screenshot(type="png")
+        page.close()
+        browser.close()
+
+    return io.BytesIO(screenshot_bytes)
+
+
+def _split_text_and_tables(text: str) -> list[tuple[str, str]]:
+    """Split markdown text into alternating ("text", ...) and ("table", ...) segments.
+
+    Code blocks are protected — tables inside fenced code blocks are not extracted.
+    """
+    # Stash fenced code blocks to avoid matching tables inside them
+    code_stash: list[str] = []
+
+    def _stash(m: re.Match) -> str:
+        code_stash.append(m.group(0))
+        return f"\x00CODE{len(code_stash) - 1}\x00"
+
+    protected = re.sub(r"```.*?```", _stash, text, flags=re.DOTALL)
+
+    segments: list[tuple[str, str]] = []
+    last_end = 0
+
+    for m in _TABLE_RE.finditer(protected):
+        start = m.start()
+        # If the match doesn't start at position 0, there may be a leading newline
+        # that is part of the regex but not part of the table itself
+        table_text = m.group(0).strip("\n")
+
+        # Text before this table
+        before = protected[last_end:start].strip("\n")
+        if before:
+            # Restore code blocks in the text segment
+            for i, block in enumerate(code_stash):
+                before = before.replace(f"\x00CODE{i}\x00", block)
+            segments.append(("text", before))
+
+        # Restore code blocks in table (shouldn't happen, but be safe)
+        for i, block in enumerate(code_stash):
+            table_text = table_text.replace(f"\x00CODE{i}\x00", block)
+        segments.append(("table", table_text))
+
+        last_end = m.end()
+
+    # Remaining text after last table
+    remaining = protected[last_end:].strip("\n")
+    if remaining:
+        for i, block in enumerate(code_stash):
+            remaining = remaining.replace(f"\x00CODE{i}\x00", block)
+        segments.append(("text", remaining))
+
+    # If no tables found, return the whole thing as text
+    if not segments:
+        segments.append(("text", text))
+
+    return segments
+
+
 class TelegramBot:
     """Telegram bot that bridges messages to ClaudeOrchestrator.
 
@@ -222,6 +354,7 @@ class TelegramBot:
         log_dir: str | None = None,
         subprocess_timeout: int = 300,
         output_format: str = "streaming",
+        enable_table_image: bool = False,
     ) -> None:
         self.token = token
         self.allowed_users = allowed_users
@@ -233,6 +366,7 @@ class TelegramBot:
         self.log_dir = log_dir
         self.subprocess_timeout = subprocess_timeout
         self.output_format = output_format
+        self.enable_table_image = enable_table_image
         self.sessions: dict[int, ChatSession] = {}
 
     def _is_authorized(self, user_id: int) -> bool:
@@ -357,12 +491,15 @@ class TelegramBot:
                 session.session_id = None
 
             if result.success and result.output:
-                for chunk in _split_message(result.output):
-                    formatted = _markdown_to_telegram_html(chunk)
-                    try:
-                        await update.message.reply_text(formatted, parse_mode="HTML")
-                    except Exception:
-                        await update.message.reply_text(chunk)
+                if self.enable_table_image:
+                    await self._send_rich_output(update, result.output)
+                else:
+                    for chunk in _split_message(result.output):
+                        formatted = _markdown_to_telegram_html(chunk)
+                        try:
+                            await update.message.reply_text(formatted, parse_mode="HTML")
+                        except Exception:
+                            await update.message.reply_text(chunk)
             elif result.success:
                 await update.message.reply_text("(Claude returned no output)")
             else:
@@ -385,6 +522,26 @@ class TelegramBot:
             await typing_task
             session.last_active = time.monotonic()
             session.busy = False
+
+    async def _send_rich_output(self, update, output: str) -> None:
+        """Send output with tables rendered as images and text as HTML messages."""
+        segments = _split_text_and_tables(output)
+
+        for seg_type, content in segments:
+            if seg_type == "table":
+                try:
+                    buf = await asyncio.to_thread(_render_table_image, content)
+                    await update.message.reply_photo(photo=buf)
+                except Exception:
+                    logger.debug("Failed to render table as image, sending as text")
+                    await update.message.reply_text(f"<pre>{html.escape(content)}</pre>", parse_mode="HTML")
+            else:
+                for chunk in _split_message(content):
+                    formatted = _markdown_to_telegram_html(chunk)
+                    try:
+                        await update.message.reply_text(formatted, parse_mode="HTML")
+                    except Exception:
+                        await update.message.reply_text(chunk)
 
     async def _run_batch(self, orc: ClaudeOrchestrator, text: str):
         """Batch mode: block until done, return result. No intermediate messages."""
@@ -502,6 +659,8 @@ def bot_main(args: list[str]) -> None:
     if output_format not in ("streaming", "batch"):
         output_format = "streaming"
 
+    enable_table_image = os.environ.get("ENABLE_TABLE_IMAGE", "").lower() in ("1", "true", "yes")
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -518,5 +677,6 @@ def bot_main(args: list[str]) -> None:
         log_dir=parsed.log_dir,
         subprocess_timeout=subprocess_timeout,
         output_format=output_format,
+        enable_table_image=enable_table_image,
     )
     bot.start()

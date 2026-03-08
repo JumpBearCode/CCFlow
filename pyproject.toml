@@ -9,6 +9,9 @@ description = "Claude Code orchestrator — reusable wrapper around `claude -p` 
 requires-python = ">=3.11"
 dependencies = ["python-telegram-bot>=21.0", "python-dotenv>=1.0"]
 
+[project.optional-dependencies]
+table-image = ["playwright>=1.40"]
+
 [project.scripts]
 ccflow = "ccflow.cli:main"
 
