@@ -77,6 +77,7 @@ class ClaudeOrchestrator:
         log_path: str | None = None,
         output_dir: str | None = None,
         cwd: str | None = None,
+        sandbox: bool = False,
     ) -> None:
         """Initialize the orchestrator with Claude CLI configuration.
 
@@ -118,6 +119,10 @@ class ClaudeOrchestrator:
                 run succeeds and produces output.
             cwd: Working directory for the ``claude`` subprocess. Defaults to the
                 current working directory of the parent process.
+            sandbox: If True and ``cwd`` is set, restricts Claude to the cwd directory.
+                Deploys a PreToolUse hook that blocks file access outside the sandbox
+                and appends a system prompt constraint. The hook and settings are
+                automatically cleaned up when the session ends.
         """
         self.model = model
         self.allowed_tools = allowed_tools
@@ -139,6 +144,51 @@ class ClaudeOrchestrator:
         self.log_path = log_path
         self.output_dir = output_dir
         self.cwd = cwd
+        self.sandbox = sandbox
+        self._sandbox_dir: str | None = None
+
+    # ── sandbox ──────────────────────────────────────────────
+
+    def _enter_sandbox(self):
+        """Deploy sandbox hooks if sandbox mode is enabled.
+
+        Injects a PreToolUse hook into {cwd}/.claude/settings.json and
+        appends a system prompt constraint. Returns state for ``_exit_sandbox``,
+        or None if sandbox is not active.
+        """
+        if not self.sandbox or not self.cwd:
+            return None
+
+        from ccflow.sandbox import setup_sandbox
+
+        resolved_cwd = os.path.realpath(self.cwd)
+        state = setup_sandbox(resolved_cwd)
+
+        # Prepend sandbox constraint to append_system_prompt
+        self._sandbox_orig_prompt = self.append_system_prompt
+        constraint = (
+            f"CRITICAL CONSTRAINT: You MUST NOT access files or directories outside "
+            f"'{resolved_cwd}'. Never use 'cd' with absolute paths or '..' to escape "
+            f"this directory. All file operations must stay within '{resolved_cwd}'."
+        )
+        self.append_system_prompt = (
+            f"{constraint}\n\n{self.append_system_prompt}"
+            if self.append_system_prompt else constraint
+        )
+        self._sandbox_dir = resolved_cwd
+
+        return state
+
+    def _exit_sandbox(self, state) -> None:
+        """Tear down sandbox — restore settings.json and system prompt. No-op if state is None."""
+        if state is None:
+            return
+
+        from ccflow.sandbox import teardown_sandbox
+
+        self.append_system_prompt = self._sandbox_orig_prompt
+        self._sandbox_dir = None
+        teardown_sandbox(state)
 
     # ── private helpers ──────────────────────────────────────
 
@@ -291,6 +341,8 @@ class ClaudeOrchestrator:
         try:
             cmd = self._build_cmd()
             env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDECODE")}
+            if self._sandbox_dir:
+                env["CCFLOW_SANDBOX_DIR"] = self._sandbox_dir
 
             proc = subprocess.Popen(
                 cmd,
@@ -461,6 +513,7 @@ class ClaudeOrchestrator:
         Returns:
             A ``ClaudeResult`` containing the final output and session metadata.
         """
+        sandbox_state = self._enter_sandbox()
         _, log_file = self._open_log()
         try:
             ts = printer.timestamp()
@@ -485,6 +538,7 @@ class ClaudeOrchestrator:
         finally:
             if log_file:
                 log_file.close()
+            self._exit_sandbox(sandbox_state)
 
     def run_stream(
         self,
@@ -505,6 +559,7 @@ class ClaudeOrchestrator:
         Returns:
             A ``ClaudeResult`` containing the final output and session metadata.
         """
+        sandbox_state = self._enter_sandbox()
         _, log_file = self._open_log()
         try:
             result = self._call(prompt, log_file=log_file, print_events=True, print_banner=True, on_event=on_event)
@@ -526,6 +581,7 @@ class ClaudeOrchestrator:
         finally:
             if log_file:
                 log_file.close()
+            self._exit_sandbox(sandbox_state)
 
     def run_conversation(
         self,
@@ -550,6 +606,7 @@ class ClaudeOrchestrator:
         Returns:
             List of ``ClaudeResult`` objects, one per round.
         """
+        sandbox_state = self._enter_sandbox()
         results: list[ClaudeResult] = []
         _, log_file = self._open_log()
 
@@ -649,3 +706,4 @@ class ClaudeOrchestrator:
         finally:
             if log_file:
                 log_file.close()
+            self._exit_sandbox(sandbox_state)
