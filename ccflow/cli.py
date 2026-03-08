@@ -1,7 +1,13 @@
 """CCFlow CLI entry point — installed as `ccflow` command."""
 
 import argparse
+import os
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from ccflow import ClaudeOrchestrator
 
@@ -11,6 +17,10 @@ def main() -> None:
         from ccflow.telegram_bot import bot_main
         bot_main(sys.argv[2:])
         return
+
+    # .env defaults
+    env_cwd = os.environ.get("CCFLOW_CWD")
+    env_sandbox = os.environ.get("CCFLOW_SANDBOX", "").lower() in ("1", "true", "yes")
 
     parser = argparse.ArgumentParser(description="CCFlow: Claude Code Orchestrator")
     parser.add_argument("prompt", nargs="?", help="Prompt to send (reads stdin if omitted)")
@@ -24,9 +34,13 @@ def main() -> None:
     parser.add_argument("--allowed-tools", nargs="*", help="Allowed tools list")
     parser.add_argument("--log-dir", default="logs", help="Log directory (default: logs)")
     parser.add_argument("--output-dir", help="Save result output to this directory as .md files")
-    parser.add_argument("--cwd", help="Working directory for claude subprocess")
+    parser.add_argument("--cwd", default=env_cwd, help="Working directory for claude subprocess")
+    parser.add_argument("--sandbox", action="store_true", default=env_sandbox, help="Restrict claude to --cwd directory (requires --cwd)")
     parser.add_argument("--max-budget", type=float, help="Max budget in USD")
     args = parser.parse_args()
+
+    if args.sandbox and not args.cwd:
+        parser.error("--sandbox requires --cwd")
 
     # Read prompt from arg or stdin
     prompt = args.prompt
@@ -50,6 +64,7 @@ def main() -> None:
         log_dir=args.log_dir,
         output_dir=args.output_dir,
         cwd=args.cwd,
+        sandbox=args.sandbox,
         max_budget_usd=args.max_budget,
     )
 
