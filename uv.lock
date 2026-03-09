@@ -24,22 +24,17 @@ name = "ccflow"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "playwright" },
     { name = "python-dotenv" },
     { name = "python-telegram-bot" },
 ]
 
-[package.optional-dependencies]
-table-image = [
-    { name = "playwright" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "playwright", marker = "extra == 'table-image'", specifier = ">=1.40" },
+    { name = "playwright", specifier = ">=1.40" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-telegram-bot", specifier = ">=21.0" },
 ]
-provides-extras = ["table-image"]
 
 [[package]]
 name = "certifi"
