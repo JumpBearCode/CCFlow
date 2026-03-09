@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from ccflow.agent.orchestrator import ClaudeOrchestrator
 from ccflow.telegram.event_formatter import (
@@ -39,7 +40,10 @@ class ChatSession:
     last_active: float = field(default_factory=time.monotonic)
     busy: bool = False
     cwd: str | None = None
+    log_path: str | None = None
     status_message_id: int | None = None
+    _orchestrator: "ClaudeOrchestrator | None" = field(default=None, repr=False)
+    _stopped: bool = False
 
 
 class TelegramBot:
@@ -86,9 +90,21 @@ class TelegramBot:
                 model=self.model,
                 cwd=str(self.project_root),
             )
+            self._init_session_log(self.sessions[chat_id])
         session = self.sessions[chat_id]
         session.last_active = time.monotonic()
         return session
+
+    def _init_session_log(self, session: ChatSession) -> None:
+        """Set ``session.log_path`` based on ``self.log_dir`` and ``session.cwd``."""
+        if not self.log_dir:
+            session.log_path = None
+            return
+        log_dir = self.log_dir
+        if not Path(log_dir).is_absolute() and session.cwd:
+            log_dir = os.path.join(session.cwd, log_dir)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        session.log_path = os.path.join(log_dir, f"ccflow-{ts}.log")
 
     def _make_orchestrator(self, session: ChatSession) -> ClaudeOrchestrator:
         return ClaudeOrchestrator(
@@ -97,7 +113,7 @@ class TelegramBot:
             allowed_tools=self.allowed_tools,
             max_budget_usd=self.max_budget_usd,
             resume_session=session.session_id,
-            log_dir=self.log_dir,
+            log_path=session.log_path,
             cwd=session.cwd,
         )
 
@@ -114,6 +130,7 @@ class TelegramBot:
             "Send any message and I'll forward it to Claude.\n",
             "Commands:",
             "/reset — End current conversation & return to project root",
+            "/stop — Stop the running Claude session",
             "/model <name> — Switch model (e.g. sonnet, opus)",
             "/mkdir <name> — Create a new project directory",
             "/status — Show session info",
@@ -204,6 +221,7 @@ class TelegramBot:
                 pass
 
         session.cwd = str(target)
+        self._init_session_log(session)
 
         # Send and pin new status message
         msg = await context.bot.send_message(chat_id, f"\U0001f4c2 {dirname}")
@@ -275,6 +293,8 @@ class TelegramBot:
         orc: ClaudeOrchestrator | None = None
         try:
             orc = self._make_orchestrator(session)
+            session._orchestrator = orc
+            session._stopped = False
 
             if self.output_format == "streaming":
                 result = await self._run_streaming(orc, text, update)
@@ -283,6 +303,11 @@ class TelegramBot:
 
             if result.success and result.session_id:
                 session.session_id = result.session_id
+            elif not result.success and session._stopped:
+                # Killed by /stop — preserve session_id for resume
+                if result.session_id:
+                    session.session_id = result.session_id
+                # else: keep existing session.session_id unchanged
             elif not result.success and session.session_id:
                 # Resume failed (e.g. stale session) — clear so next message starts fresh
                 logger.warning("Resume failed for session %s, clearing", session.session_id)
@@ -300,6 +325,8 @@ class TelegramBot:
                             await update.message.reply_text(chunk)
             elif result.success:
                 await update.message.reply_text("(Claude returned no output)")
+            elif session._stopped:
+                pass  # /stop handler already replied
             else:
                 await update.message.reply_text(f"Error: {result.error}")
 
@@ -318,8 +345,31 @@ class TelegramBot:
         finally:
             stop_typing.set()
             await typing_task
+            session._orchestrator = None
             session.last_active = time.monotonic()
             session.busy = False
+
+    async def _handle_stop(self, update, context) -> None:
+        chat_id = update.effective_chat.id
+        session = self.sessions.get(chat_id)
+
+        if not session or not session.busy:
+            await update.message.reply_text("Nothing is running.")
+            return
+
+        orc = session._orchestrator
+        if orc is None:
+            await update.message.reply_text("Nothing is running.")
+            return
+
+        proc = getattr(orc, "_proc", None)
+        if proc is None or proc.poll() is not None:
+            await update.message.reply_text("Process already finished.")
+            return
+
+        session._stopped = True
+        proc.kill()
+        await update.message.reply_text("Stopped. Send a follow-up message to continue the conversation.")
 
     async def _send_rich_output(self, update, output: str) -> None:
         """Send output with tables rendered as images and text as HTML messages."""
@@ -421,6 +471,7 @@ class TelegramBot:
         app.add_handler(CommandHandler("model", self._handle_model))
         app.add_handler(CommandHandler("status", self._handle_status))
         app.add_handler(CommandHandler("mkdir", self._handle_mkdir))
+        app.add_handler(CommandHandler("stop", self._handle_stop))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
@@ -437,7 +488,7 @@ def bot_main(args: list[str]) -> None:
     parser.add_argument("--allowed-tools", nargs="*", help="Allowed tools list")
     parser.add_argument("--max-budget", type=float, help="Max budget in USD per invocation")
     parser.add_argument("--cwd", help="Working directory for claude subprocess")
-    parser.add_argument("--log-dir", default="logs", help="Log directory (default: logs)")
+    parser.add_argument("--log-dir", default="logs", help="Log directory, relative to each session's cwd (default: logs)")
     parser.add_argument("--subprocess-timeout", type=int, default=300, help="Max time per Claude call in seconds (default: 300)")
     parsed = parser.parse_args(args)
 
