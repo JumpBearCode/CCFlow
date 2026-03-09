@@ -40,16 +40,41 @@ pip install git+https://github.com/JumpBearCode/CCFlow.git
 
 ```
 CCFlow/
-  main.py                  # convenience wrapper → ccflow.cli.main()
-  pyproject.toml            # zero dependencies, Python >=3.11, [project.scripts] ccflow
+  main.py                       # convenience wrapper → ccflow.cli.main()
+  pyproject.toml                 # zero dependencies, Python >=3.11, [project.scripts] ccflow
   ccflow/
-    __init__.py             # exports ClaudeOrchestrator, ClaudeResult
-    cli.py                  # CLI entry point — installed as `ccflow` command
-    orchestrator.py         # core class — builds CLI args, runs subprocess, parses events
-    printer.py              # Claude Code style terminal printer (╭╰│⏺⎿ + timestamps)
+    __init__.py                  # re-exports: ClaudeOrchestrator, ClaudeResult, format_event
+    cli.py                       # CLI entry point — installed as `ccflow` command
+    utils.py                     # shared utilities: format_tool_input, shorten (leaf, no ccflow imports)
+    agent/
+      __init__.py
+      orchestrator.py            # core class — builds CLI args, runs subprocess, parses events
+      printer.py                 # Claude Code style terminal printer (╭╰│⏺⎿ + timestamps)
+      sandbox.py                 # sandbox setup/teardown
+      hooks/
+        __init__.py
+        sandbox_guard.py         # PreToolUse hook script
+    telegram/
+      __init__.py
+      telegram_bot.py            # TelegramBot class + ChatSession + bot_main CLI entry
+      event_formatter.py         # format_event + Telegram-specific formatting
 ```
 
 ## Architecture
+
+```
+ccflow/utils.py                  ← stdlib only (leaf)
+
+agent/printer.py                 ← utils
+agent/sandbox.py                 ← stdlib only (leaf)
+agent/orchestrator.py            ← agent/printer, agent/sandbox
+
+telegram/event_formatter.py      ← utils (no agent dependency)
+telegram/telegram_bot.py         ← agent/orchestrator, telegram/event_formatter
+
+ccflow/__init__.py               ← agent/orchestrator, telegram/event_formatter
+ccflow/cli.py                    ← ccflow/__init__, telegram/telegram_bot (lazy)
+```
 
 ```
 ClaudeOrchestrator
@@ -60,6 +85,7 @@ ClaudeOrchestrator
 ```
 
 All three public methods are fully decoupled — each independently composes `_call()` + shared helpers.
+agent/ and telegram/ have zero cross-dependencies (telegram only imports agent/orchestrator).
 
 ## How to Run
 

@@ -14,7 +14,7 @@ from ccflow import ClaudeOrchestrator
 
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "bot":
-        from ccflow.telegram_bot import bot_main
+        from ccflow.telegram.telegram_bot import bot_main
         bot_main(sys.argv[2:])
         return
 

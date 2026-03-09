@@ -4,9 +4,10 @@ Reproduces the visual style of Claude Code's terminal output,
 with [HH:MM:SS] timestamps on every line.
 """
 
-import json
 import sys
 from datetime import datetime
+
+from ccflow.utils import format_tool_input, shorten
 
 # ANSI codes matching Claude Code CLI
 DIM = "\033[2m"
@@ -21,69 +22,6 @@ BANNER_WIDTH = 55
 def timestamp() -> str:
     """Return current time as HH:MM:SS."""
     return datetime.now().strftime("%H:%M:%S")
-
-
-def shorten(text: str, max_len: int = 200) -> str:
-    """Collapse newlines and truncate text."""
-    if not text:
-        return ""
-    text = text.replace("\n", " ").strip()
-    return text[:max_len] + "..." if len(text) > max_len else text
-
-
-def format_tool_input(tool_input: dict) -> str:
-    """Intelligently extract the most useful parameters from tool input."""
-    if not tool_input:
-        return ""
-
-    # Bash command
-    if "command" in tool_input:
-        return f'command={shorten(tool_input["command"], 120)!r}'
-
-    # File path (Read, Write)
-    if "file_path" in tool_input:
-        s = f'file_path="{tool_input["file_path"]}"'
-        if "pattern" in tool_input:
-            s += f'  pattern="{tool_input["pattern"]}"'
-        return s
-
-    # Grep/Glob pattern + path
-    if "pattern" in tool_input:
-        s = f'pattern="{tool_input["pattern"]}"'
-        if "path" in tool_input:
-            s += f'  path="{tool_input["path"]}"'
-        return s
-
-    # Web search / fetch
-    if "query" in tool_input:
-        return f'query="{shorten(tool_input["query"], 120)}"'
-    if "url" in tool_input:
-        return f'url="{tool_input["url"]}"'
-
-    # Skill
-    if "skill" in tool_input:
-        return f'skill="{tool_input["skill"]}"'
-
-    # Agent prompt
-    if "prompt" in tool_input:
-        return f'prompt={shorten(tool_input["prompt"], 120)!r}'
-
-    # Edit: old_string → new_string
-    if "old_string" in tool_input:
-        old = shorten(tool_input["old_string"], 50)
-        new = shorten(tool_input.get("new_string", ""), 50)
-        return f'"{old}" → "{new}"'
-
-    # Selector-based tools (MCP browser etc.)
-    if "selector" in tool_input:
-        parts = [tool_input["selector"]]
-        for key in ("value", "value_or_label"):
-            if key in tool_input:
-                parts.append(f'"{tool_input[key]}"')
-        return " ".join(parts)
-
-    # Fallback: JSON truncated
-    return shorten(json.dumps(tool_input, ensure_ascii=False), 120)
 
 
 def _ts_print(*args: str) -> None:
@@ -226,3 +164,55 @@ def print_event(event: dict) -> None:
             resets_at = info.get("resetsAt", "?")
             _ts_print(f"{RED}⚠ Rate limited — resets at {resets_at}{RESET}")
         return
+
+
+def print_batch_summary(
+    duration_ms: int,
+    cost_usd: float | None,
+    num_turns: int | None,
+    usage: dict | None,
+    session_id: str | None,
+) -> None:
+    """Print a one-liner batch summary (duration, cost, turns, tokens, session)."""
+    parts = [f"Done ({duration_ms / 1000:.1f}s)"]
+    if cost_usd is not None:
+        parts.append(f"${cost_usd:.4f}")
+    if num_turns is not None:
+        parts.append(f"{num_turns} turns")
+    if usage:
+        inp = usage.get("input_tokens", 0)
+        out = usage.get("output_tokens", 0)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_write = usage.get("cache_creation_input_tokens", 0)
+        token_parts = [f"{_fmt_tokens(inp)} in", f"{_fmt_tokens(out)} out"]
+        if cache_read:
+            token_parts.append(f"{_fmt_tokens(cache_read)} cached")
+        if cache_write:
+            token_parts.append(f"{_fmt_tokens(cache_write)} cache-write")
+        parts.append(" + ".join(token_parts))
+    ts = timestamp()
+    print(
+        f"{DIM}[{ts}]{RESET} "
+        f"{BOLD}CCFlow{RESET} "
+        + "  │  ".join(parts),
+        flush=True,
+    )
+    if session_id:
+        ts = timestamp()
+        print(
+            f"{DIM}[{ts}]{RESET} "
+            f"{BOLD}CCFlow{RESET} "
+            f"Session: {session_id}",
+            flush=True,
+        )
+
+
+def print_output_saved(output_path: str) -> None:
+    """Print notification that output was saved to disk."""
+    ts = timestamp()
+    print(
+        f"{DIM}[{ts}]{RESET} "
+        f"{BOLD}CCFlow{RESET} "
+        f"Output saved: {output_path}",
+        flush=True,
+    )

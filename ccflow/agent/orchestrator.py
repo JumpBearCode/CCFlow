@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-from ccflow import printer
+from ccflow.agent import printer
 
 
 @dataclass
@@ -53,6 +53,13 @@ class ClaudeOrchestrator:
     - ``run_stream(prompt)`` — stream mode, real-time Claude Code style printing
     - ``run_conversation(initial_prompt)`` — multi-round interactive conversation
     """
+
+    _DEFAULT_HINTS = (
+        "When retrieving information from the web, prefer WebSearch over WebFetch. "
+        "WebFetch often fails on dynamic/JS-rendered pages (SPAs). "
+        "Only use WebFetch when you need to extract content from a specific URL "
+        "known to have static content."
+    )
 
     def __init__(
         self,
@@ -159,7 +166,7 @@ class ClaudeOrchestrator:
         if not self.sandbox or not self.cwd:
             return None
 
-        from ccflow.sandbox import setup_sandbox
+        from ccflow.agent.sandbox import setup_sandbox
 
         resolved_cwd = os.path.realpath(self.cwd)
         state = setup_sandbox(resolved_cwd)
@@ -184,7 +191,7 @@ class ClaudeOrchestrator:
         if state is None:
             return
 
-        from ccflow.sandbox import teardown_sandbox
+        from ccflow.agent.sandbox import teardown_sandbox
 
         self.append_system_prompt = self._sandbox_orig_prompt
         self._sandbox_dir = None
@@ -232,8 +239,12 @@ class ClaudeOrchestrator:
         if self.system_prompt:
             cmd += ["--system-prompt", self.system_prompt]
 
-        if self.append_system_prompt:
-            cmd += ["--append-system-prompt", self.append_system_prompt]
+        append_prompt = self.append_system_prompt
+        if append_prompt:
+            append_prompt = f"{self._DEFAULT_HINTS}\n\n{append_prompt}"
+        else:
+            append_prompt = self._DEFAULT_HINTS
+        cmd += ["--append-system-prompt", append_prompt]
 
         if self.mcp_config:
             for cfg in self.mcp_config:
@@ -438,50 +449,6 @@ class ClaudeOrchestrator:
         except Exception as e:
             return ClaudeResult(success=False, error=str(e))
 
-    def _print_batch_summary(self, result: ClaudeResult) -> None:
-        """Print a one-liner batch summary (duration, cost, turns, tokens, session)."""
-        parts = [f"Done ({result.duration_ms / 1000:.1f}s)"]
-        if result.cost_usd is not None:
-            parts.append(f"${result.cost_usd:.4f}")
-        if result.num_turns is not None:
-            parts.append(f"{result.num_turns} turns")
-        if result.usage:
-            inp = result.usage.get("input_tokens", 0)
-            out = result.usage.get("output_tokens", 0)
-            cache_read = result.usage.get("cache_read_input_tokens", 0)
-            cache_write = result.usage.get("cache_creation_input_tokens", 0)
-            token_parts = [f"{printer._fmt_tokens(inp)} in", f"{printer._fmt_tokens(out)} out"]
-            if cache_read:
-                token_parts.append(f"{printer._fmt_tokens(cache_read)} cached")
-            if cache_write:
-                token_parts.append(f"{printer._fmt_tokens(cache_write)} cache-write")
-            parts.append(" + ".join(token_parts))
-        ts = printer.timestamp()
-        print(
-            f"{printer.DIM}[{ts}]{printer.RESET} "
-            f"{printer.BOLD}CCFlow{printer.RESET} "
-            + "  │  ".join(parts),
-            flush=True,
-        )
-        if result.session_id:
-            ts = printer.timestamp()
-            print(
-                f"{printer.DIM}[{ts}]{printer.RESET} "
-                f"{printer.BOLD}CCFlow{printer.RESET} "
-                f"Session: {result.session_id}",
-                flush=True,
-            )
-
-    def _print_output_saved(self, output_path: str) -> None:
-        """Print notification that output was saved to disk."""
-        ts = printer.timestamp()
-        print(
-            f"{printer.DIM}[{ts}]{printer.RESET} "
-            f"{printer.BOLD}CCFlow{printer.RESET} "
-            f"Output saved: {output_path}",
-            flush=True,
-        )
-
     @staticmethod
     def _accumulate_usage(totals: dict, round_usage: dict | None) -> dict:
         """Merge a round's usage dict into a running totals dict."""
@@ -525,14 +492,17 @@ class ClaudeOrchestrator:
             )
 
             result = self._call(prompt, log_file=log_file, print_events=False, print_banner=False, on_event=on_event)
-            self._print_batch_summary(result)
+            printer.print_batch_summary(
+                result.duration_ms, result.cost_usd, result.num_turns,
+                result.usage, result.session_id,
+            )
 
             if result.success and result.output:
                 print(f"\n{result.output}", flush=True)
 
             output_path = self._write_output(result)
             if output_path:
-                self._print_output_saved(output_path)
+                printer.print_output_saved(output_path)
 
             return result
         finally:
@@ -575,7 +545,7 @@ class ClaudeOrchestrator:
 
             output_path = self._write_output(result)
             if output_path:
-                self._print_output_saved(output_path)
+                printer.print_output_saved(output_path)
 
             return result
         finally:
@@ -699,7 +669,7 @@ class ClaudeOrchestrator:
             if results:
                 output_path = self._write_output(results[-1])
                 if output_path:
-                    self._print_output_saved(output_path)
+                    printer.print_output_saved(output_path)
 
             return results
 
