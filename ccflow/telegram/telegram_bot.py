@@ -38,6 +38,8 @@ class ChatSession:
     model: str = "opus"
     last_active: float = field(default_factory=time.monotonic)
     busy: bool = False
+    cwd: str | None = None
+    status_message_id: int | None = None
 
 
 class TelegramBot:
@@ -68,7 +70,7 @@ class TelegramBot:
         self.danger = danger
         self.allowed_tools = allowed_tools
         self.max_budget_usd = max_budget_usd
-        self.cwd = cwd
+        self.project_root = Path(cwd).resolve() if cwd else Path.cwd()
         self.log_dir = log_dir
         self.subprocess_timeout = subprocess_timeout
         self.output_format = output_format
@@ -80,7 +82,10 @@ class TelegramBot:
 
     def _get_or_create_session(self, chat_id: int) -> ChatSession:
         if chat_id not in self.sessions:
-            self.sessions[chat_id] = ChatSession(model=self.model)
+            self.sessions[chat_id] = ChatSession(
+                model=self.model,
+                cwd=str(self.project_root),
+            )
         session = self.sessions[chat_id]
         session.last_active = time.monotonic()
         return session
@@ -93,22 +98,50 @@ class TelegramBot:
             max_budget_usd=self.max_budget_usd,
             resume_session=session.session_id,
             log_dir=self.log_dir,
-            cwd=self.cwd,
+            cwd=session.cwd,
         )
 
     async def _handle_start(self, update, context) -> None:
-        await update.message.reply_text(
-            "Welcome to CCFlow Bot!\n\n"
-            "Send any message and I'll forward it to Claude.\n\n"
-            "Commands:\n"
-            "/reset — End current conversation\n"
-            "/model <name> — Switch model (e.g. sonnet, opus)\n"
-            "/status — Show session info"
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        subdirs = sorted(
+            p.name for p in self.project_root.iterdir()
+            if p.is_dir() and not p.name.startswith(".")
         )
+
+        lines = [
+            "Welcome to CCFlow Bot!\n",
+            "Send any message and I'll forward it to Claude.\n",
+            "Commands:",
+            "/reset — End current conversation & return to project root",
+            "/model <name> — Switch model (e.g. sonnet, opus)",
+            "/mkdir <name> — Create a new project directory",
+            "/status — Show session info",
+        ]
+
+        if subdirs:
+            lines.append("\nSelect a project to work in, or just send a message to work in the project root:")
+            keyboard = [
+                [InlineKeyboardButton(name, callback_data=f"cd:{name}")]
+                for name in subdirs
+            ]
+            await update.message.reply_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            lines.append("\nNo project directories found. Use /mkdir <name> to create one, or just send a message to start.")
+            await update.message.reply_text("\n".join(lines))
 
     async def _handle_reset(self, update, context) -> None:
         chat_id = update.effective_chat.id
-        if chat_id in self.sessions:
+        session = self.sessions.get(chat_id)
+        if session:
+            if session.status_message_id:
+                try:
+                    await context.bot.unpin_chat_message(chat_id, session.status_message_id)
+                except Exception:
+                    pass
             del self.sessions[chat_id]
             await update.message.reply_text("Session cleared. Next message starts a fresh conversation.")
         else:
@@ -132,6 +165,7 @@ class TelegramBot:
         if not session:
             await update.message.reply_text(
                 f"No active session.\nDefault model: {self.model}\n"
+                f"CWD: {self.project_root}\n"
                 f"Active sessions: {len(self.sessions)}"
             )
             return
@@ -139,10 +173,68 @@ class TelegramBot:
         await update.message.reply_text(
             f"Session ID: {session.session_id or '(new)'}\n"
             f"Model: {session.model}\n"
+            f"CWD: {session.cwd}\n"
             f"Idle: {idle}s\n"
             f"Busy: {session.busy}\n"
             f"Active sessions: {len(self.sessions)}"
         )
+
+    async def _handle_callback(self, update, context) -> None:
+        query = update.callback_query
+        data = query.data or ""
+
+        if not data.startswith("cd:"):
+            await query.answer("Unknown action.")
+            return
+
+        dirname = data[3:]
+        target = (self.project_root / dirname).resolve()
+        if not target.is_relative_to(self.project_root) or not target.is_dir():
+            await query.answer("Invalid directory.")
+            return
+
+        chat_id = update.effective_chat.id
+        session = self._get_or_create_session(chat_id)
+
+        # Unpin previous status message if any
+        if session.status_message_id:
+            try:
+                await context.bot.unpin_chat_message(chat_id, session.status_message_id)
+            except Exception:
+                pass
+
+        session.cwd = str(target)
+
+        # Send and pin new status message
+        msg = await context.bot.send_message(chat_id, f"\U0001f4c2 {dirname}")
+        session.status_message_id = msg.message_id
+        try:
+            await context.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
+        except Exception:
+            pass
+
+        await query.answer(f"Switched to {dirname}")
+
+    async def _handle_mkdir(self, update, context) -> None:
+        if not context.args:
+            await update.message.reply_text("Usage: /mkdir <name>")
+            return
+
+        name = context.args[0]
+        if not name or "/" in name or ".." in name:
+            await update.message.reply_text("Invalid directory name.")
+            return
+
+        target = (self.project_root / name).resolve()
+        if not target.is_relative_to(self.project_root):
+            await update.message.reply_text("Invalid directory name.")
+            return
+        if target.exists():
+            await update.message.reply_text(f"'{name}' already exists.")
+            return
+
+        target.mkdir()
+        await update.message.reply_text(f"Created directory: {name}")
 
     @staticmethod
     async def _keep_typing(chat_id: int, bot, stop_event: asyncio.Event) -> None:
@@ -316,6 +408,7 @@ class TelegramBot:
         from telegram import Update
         from telegram.ext import (
             ApplicationBuilder,
+            CallbackQueryHandler,
             CommandHandler,
             MessageHandler,
             filters,
@@ -327,6 +420,8 @@ class TelegramBot:
         app.add_handler(CommandHandler("reset", self._handle_reset))
         app.add_handler(CommandHandler("model", self._handle_model))
         app.add_handler(CommandHandler("status", self._handle_status))
+        app.add_handler(CommandHandler("mkdir", self._handle_mkdir))
+        app.add_handler(CallbackQueryHandler(self._handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
         logger.info("Starting CCFlow Telegram bot (model=%s, danger=%s)", self.model, self.danger)
