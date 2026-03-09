@@ -58,7 +58,11 @@ class ClaudeOrchestrator:
         "When retrieving information from the web, prefer WebSearch over WebFetch. "
         "WebFetch often fails on dynamic/JS-rendered pages (SPAs). "
         "Only use WebFetch when you need to extract content from a specific URL "
-        "known to have static content."
+        "known to have static content.\n\n"
+        "When doing any Python-related work, you MUST use uv as the project manager. "
+        "Always use `uv run` to execute Python files and `uv add` / `uv pip` to install packages — "
+        "never use pip directly. "
+        "When creating a new Python project, always check whether a pyproject.toml already exists before proceeding."
     )
 
     def __init__(
@@ -276,6 +280,8 @@ class ClaudeOrchestrator:
         Priority: ``log_path`` (explicit) > ``log_dir`` (auto-generate) > None.
         When using ``log_dir``, generates a filename like
         ``ccflow-20260303-093015.log`` based on the current timestamp.
+        If ``log_dir`` is a relative path and ``cwd`` is set, the log directory
+        is resolved relative to ``cwd`` so logs land in the project directory.
 
         Returns:
             Absolute or relative path string, or None if logging is disabled.
@@ -283,8 +289,11 @@ class ClaudeOrchestrator:
         if self.log_path:
             return self.log_path
         if self.log_dir:
+            log_dir = self.log_dir
+            if not Path(log_dir).is_absolute() and self.cwd:
+                log_dir = os.path.join(self.cwd, log_dir)
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-            return os.path.join(self.log_dir, f"ccflow-{ts}.log")
+            return os.path.join(log_dir, f"ccflow-{ts}.log")
         return None
 
     def _write_output(self, result: ClaudeResult) -> str | None:
@@ -318,7 +327,8 @@ class ClaudeOrchestrator:
         if not log_path:
             return None, None
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-        return log_path, open(log_path, "w", encoding="utf-8")
+        mode = "a" if self.log_path else "w"
+        return log_path, open(log_path, mode, encoding="utf-8")
 
     def _call(
         self,

@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from ccflow.agent.orchestrator import ClaudeOrchestrator
 from ccflow.telegram.event_formatter import (
@@ -39,6 +40,7 @@ class ChatSession:
     last_active: float = field(default_factory=time.monotonic)
     busy: bool = False
     cwd: str | None = None
+    log_path: str | None = None
     status_message_id: int | None = None
 
 
@@ -86,9 +88,21 @@ class TelegramBot:
                 model=self.model,
                 cwd=str(self.project_root),
             )
+            self._init_session_log(self.sessions[chat_id])
         session = self.sessions[chat_id]
         session.last_active = time.monotonic()
         return session
+
+    def _init_session_log(self, session: ChatSession) -> None:
+        """Set ``session.log_path`` based on ``self.log_dir`` and ``session.cwd``."""
+        if not self.log_dir:
+            session.log_path = None
+            return
+        log_dir = self.log_dir
+        if not Path(log_dir).is_absolute() and session.cwd:
+            log_dir = os.path.join(session.cwd, log_dir)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        session.log_path = os.path.join(log_dir, f"ccflow-{ts}.log")
 
     def _make_orchestrator(self, session: ChatSession) -> ClaudeOrchestrator:
         return ClaudeOrchestrator(
@@ -97,7 +111,7 @@ class TelegramBot:
             allowed_tools=self.allowed_tools,
             max_budget_usd=self.max_budget_usd,
             resume_session=session.session_id,
-            log_dir=self.log_dir,
+            log_path=session.log_path,
             cwd=session.cwd,
         )
 
@@ -204,6 +218,7 @@ class TelegramBot:
                 pass
 
         session.cwd = str(target)
+        self._init_session_log(session)
 
         # Send and pin new status message
         msg = await context.bot.send_message(chat_id, f"\U0001f4c2 {dirname}")
@@ -437,7 +452,7 @@ def bot_main(args: list[str]) -> None:
     parser.add_argument("--allowed-tools", nargs="*", help="Allowed tools list")
     parser.add_argument("--max-budget", type=float, help="Max budget in USD per invocation")
     parser.add_argument("--cwd", help="Working directory for claude subprocess")
-    parser.add_argument("--log-dir", default="logs", help="Log directory (default: logs)")
+    parser.add_argument("--log-dir", default="logs", help="Log directory, relative to each session's cwd (default: logs)")
     parser.add_argument("--subprocess-timeout", type=int, default=300, help="Max time per Claude call in seconds (default: 300)")
     parsed = parser.parse_args(args)
 
