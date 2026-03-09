@@ -42,6 +42,8 @@ class ChatSession:
     cwd: str | None = None
     log_path: str | None = None
     status_message_id: int | None = None
+    _orchestrator: "ClaudeOrchestrator | None" = field(default=None, repr=False)
+    _stopped: bool = False
 
 
 class TelegramBot:
@@ -128,6 +130,7 @@ class TelegramBot:
             "Send any message and I'll forward it to Claude.\n",
             "Commands:",
             "/reset — End current conversation & return to project root",
+            "/stop — Stop the running Claude session",
             "/model <name> — Switch model (e.g. sonnet, opus)",
             "/mkdir <name> — Create a new project directory",
             "/status — Show session info",
@@ -290,6 +293,8 @@ class TelegramBot:
         orc: ClaudeOrchestrator | None = None
         try:
             orc = self._make_orchestrator(session)
+            session._orchestrator = orc
+            session._stopped = False
 
             if self.output_format == "streaming":
                 result = await self._run_streaming(orc, text, update)
@@ -298,6 +303,11 @@ class TelegramBot:
 
             if result.success and result.session_id:
                 session.session_id = result.session_id
+            elif not result.success and session._stopped:
+                # Killed by /stop — preserve session_id for resume
+                if result.session_id:
+                    session.session_id = result.session_id
+                # else: keep existing session.session_id unchanged
             elif not result.success and session.session_id:
                 # Resume failed (e.g. stale session) — clear so next message starts fresh
                 logger.warning("Resume failed for session %s, clearing", session.session_id)
@@ -315,6 +325,8 @@ class TelegramBot:
                             await update.message.reply_text(chunk)
             elif result.success:
                 await update.message.reply_text("(Claude returned no output)")
+            elif session._stopped:
+                pass  # /stop handler already replied
             else:
                 await update.message.reply_text(f"Error: {result.error}")
 
@@ -333,8 +345,31 @@ class TelegramBot:
         finally:
             stop_typing.set()
             await typing_task
+            session._orchestrator = None
             session.last_active = time.monotonic()
             session.busy = False
+
+    async def _handle_stop(self, update, context) -> None:
+        chat_id = update.effective_chat.id
+        session = self.sessions.get(chat_id)
+
+        if not session or not session.busy:
+            await update.message.reply_text("Nothing is running.")
+            return
+
+        orc = session._orchestrator
+        if orc is None:
+            await update.message.reply_text("Nothing is running.")
+            return
+
+        proc = getattr(orc, "_proc", None)
+        if proc is None or proc.poll() is not None:
+            await update.message.reply_text("Process already finished.")
+            return
+
+        session._stopped = True
+        proc.kill()
+        await update.message.reply_text("Stopped. Send a follow-up message to continue the conversation.")
 
     async def _send_rich_output(self, update, output: str) -> None:
         """Send output with tables rendered as images and text as HTML messages."""
@@ -436,6 +471,7 @@ class TelegramBot:
         app.add_handler(CommandHandler("model", self._handle_model))
         app.add_handler(CommandHandler("status", self._handle_status))
         app.add_handler(CommandHandler("mkdir", self._handle_mkdir))
+        app.add_handler(CommandHandler("stop", self._handle_stop))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
