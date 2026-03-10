@@ -1,13 +1,35 @@
 # CCFlow
 
-Claude Code CLI wrapper — a Python library + CLI that wraps `claude -p` into a reusable interface.
+An extremely lightweight wrapper around [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that turns it into a remote-controllable AI engine — run Claude from your phone via Telegram, from scripts via Python API, or from the terminal via CLI.
 
-- Parses `stream-json` output in real-time
-- Prints Claude Code style formatted output (banners, tool calls, timestamps)
-- Token breakdown per run (input/output/cached/cache-write)
-- Multi-round interactive conversation mode
-- Session resume/continue support
-- Zero external dependencies, Python >=3.11
+## Why CCFlow?
+
+Tools like OpenClaw let you send commands from your phone to your own AI engine, but they come with real trade-offs: security concerns, token cost explosions, and the overhead of maintaining your own agent runtime.
+
+Claude Code already provides agent loops, memory, tool use, instruction following, hooks, skills, and MCP support — it's one of the most capable coding CLIs available. CCFlow wraps it into a reusable interface so you get the same "agent on my phone" experience without building an agent runtime from scratch. And if you're on a Max Plan, cost is fixed.
+
+Think of it as the classic stack trade-off:
+
+| Layer | Approach | Example |
+|---|---|---|
+| **IaaS** | Train or fine-tune your own LLM | Self-hosted models |
+| **PaaS** | Build your own agent runtime | OpenClaw, NanoClaw |
+| **SaaS** | Wrap a managed agent service | **CCFlow** on Claude Code |
+
+More control means more infrastructure. For many use cases — summarizing news, analyzing repos, quick prototyping from your phone, email summaries — a simpler solution built on top of existing tools is more than enough.
+
+## What CCFlow Does
+
+- **Telegram bot layer** — send prompts from your phone, get streamed tool calls and results back
+- **Project navigation** — `cd` into different projects, `ls` to list them, `mkdir` to create new ones
+- **Plan mode** — read-only exploration, no file modifications
+- **Stop command** — abort a running Claude session mid-execution and steer direction
+- **Session resume** — multi-round conversations via `claude -p` subprocess + session ID tracking
+- **Sandbox mode** — hook + prompt injection to restrict Claude to a working directory (lightweight alternative to Docker)
+- **Streaming visibility** — real-time tool calls and thinking streamed to terminal or Telegram
+- **Table-to-image rendering** — markdown tables converted to PNG for mobile readability
+- **Proper lifecycle management** — subprocess cleanup, session timeout, orphan process killing
+- **Zero external dependencies** for the core library (Python >=3.11, stdlib only)
 
 ## Prerequisites
 
@@ -192,6 +214,110 @@ result.usage            # {"input_tokens": ..., "output_tokens": ..., ...}
 result.error            # error message if success=False
 ```
 
+## Telegram Bot
+
+The Telegram bot gives you the "agent on your phone" experience — send a message, get Claude working on your codebase, see tool calls streamed back in real-time.
+
+Each chat maintains its own session for multi-turn conversations with session resume.
+
+### Setup
+
+The `.env` file should already be configured during installation (see [Install](#install)). Then run:
+
+```bash
+ccflow bot --danger
+```
+
+If you need table image rendering, also install Chromium (one-time):
+
+```bash
+playwright install chromium
+
+# Linux servers also need system dependencies:
+playwright install-deps chromium
+```
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | — | Bot token from [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_ALLOWED_USERS` | No | — | Comma-separated Telegram user IDs. If unset, anyone can use the bot |
+| `OUTPUT_FORMAT` | No | `streaming` | `streaming` (real-time tool calls) or `batch` (wait for full response) |
+| `CLAUDE_SUBPROCESS_TIMEOUT` | No | `300` | Max seconds per Claude invocation |
+| `ENABLE_TABLE_IMAGE` | No | `false` | Render markdown tables as images (requires Playwright setup) |
+
+### Bot Commands
+
+| Command | Description |
+|---|---|
+| `/start` | Welcome message + project navigation (shows inline keyboard with available projects) |
+| `/reset` | Clear session history, start fresh |
+| `/stop` | Abort the currently running Claude session mid-execution |
+| `/model <name>` | Switch model (e.g. `sonnet`, `opus`) |
+| `/status` | Show current session info (model, cwd, idle time, active sessions) |
+| `/mkdir <name>` | Create a new project directory |
+
+**Project navigation:** `/start` shows an inline keyboard listing subdirectories under the project root. Tap a project to switch Claude's working directory — a pinned status message shows which project is active.
+
+### Bot Features
+
+- **Streaming output** — real-time tool call updates with emoji indicators (⌨️ Bash, 📄 Read, ✏️ Write, 🔍 Search, 💡 Thinking)
+- **Multi-turn conversations** — each message continues the same Claude session via session ID resume
+- **Concurrent request protection** — "Still processing..." if you send while Claude is working
+- **Typing indicator** — shows "typing..." every 4 seconds during processing
+- **Output splitting** — long responses auto-split at 4096 chars (Telegram's limit)
+- **Table-to-image** — markdown tables rendered as PNG via headless Chromium for mobile readability
+
+### CLI Flags
+
+```bash
+ccflow bot --danger                    # required: skip permission checks
+ccflow bot --danger -m sonnet          # specify model
+ccflow bot --danger --cwd /path/to/dir # working directory for Claude
+ccflow bot --danger --max-budget 1.0   # budget cap per invocation
+ccflow bot --danger --subprocess-timeout 600
+```
+
+### Table Image Rendering (Optional)
+
+When `ENABLE_TABLE_IMAGE=true`, markdown tables in Claude's output are rendered as PNG images using headless Chromium, then sent as photos. This makes tables readable on mobile.
+
+**Setup:**
+
+```bash
+# 1. Install with table-image extra
+uv add "ccflow[table-image] @ git+https://github.com/JumpBearCode/CCFlow.git"
+# or for local dev:
+uv sync --extra table-image
+
+# 2. Install Chromium (one-time, ~300MB, stored in user cache)
+uv run playwright install chromium
+
+# Linux servers also need system dependencies:
+uv run playwright install-deps chromium
+```
+
+**Docker:**
+
+```dockerfile
+RUN uv sync --extra table-image \
+    && uv run playwright install-deps chromium \
+    && uv run playwright install chromium
+```
+
+Then set `ENABLE_TABLE_IMAGE=true` in your `.env`.
+
+If Playwright is not installed or rendering fails, it falls back to sending the raw table as `<pre>` text.
+
+## Sandbox Mode
+
+CCFlow includes a dual-layer sandbox to restrict Claude to a specific working directory — a lightweight alternative to running in Docker.
+
+**Layer 1: Prompt injection** — auto-injected system prompt telling Claude not to access files outside the sandbox directory.
+
+**Layer 2: PreToolUse hook** — a hook script deployed to `.claude/settings.json` that validates every tool call's file paths against the sandbox boundary. Covers `Read`, `Write`, `Edit`, `Glob`, `Grep` (path prefix matching, ~100% reliable) and `Bash` (heuristic regex patterns for `cd`, absolute paths, `..` traversal, ~90-95% reliable).
+
 ## Architecture
 
 ```
@@ -262,82 +388,3 @@ You: exit
 [09:31:00] │  Session: abc-123-def
 [09:31:00] ╰──────────────────────────────────────────────────────
 ```
-
-## Telegram Bot
-
-CCFlow includes a Telegram bot that bridges messages to Claude. Each chat maintains its own session for multi-turn conversations.
-
-### Setup
-
-The `.env` file should already be configured during installation (see [Install](#install)). Then run:
-
-```bash
-ccflow bot --danger
-```
-
-If you need table image rendering, also install Chromium (one-time):
-
-```bash
-playwright install chromium
-
-# Linux servers also need system dependencies:
-playwright install-deps chromium
-```
-
-### Environment Variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Yes | — | Bot token from [@BotFather](https://t.me/BotFather) |
-| `TELEGRAM_ALLOWED_USERS` | No | — | Comma-separated Telegram user IDs. If unset, anyone can use the bot |
-| `OUTPUT_FORMAT` | No | `streaming` | `streaming` (real-time tool calls) or `batch` (wait for full response) |
-| `CLAUDE_SUBPROCESS_TIMEOUT` | No | `300` | Max seconds per Claude invocation |
-| `ENABLE_TABLE_IMAGE` | No | `false` | Render markdown tables as images (requires Playwright setup) |
-
-### Bot Commands
-
-- `/start` — Welcome message
-- `/reset` — Clear session, start fresh
-- `/model <name>` — Switch model (e.g. `sonnet`, `opus`)
-- `/status` — Show current session info
-
-### CLI Flags
-
-```bash
-uv run ccflow bot --danger                    # required: skip permission checks
-uv run ccflow bot --danger -m sonnet          # specify model
-uv run ccflow bot --danger --cwd /path/to/dir # working directory for Claude
-uv run ccflow bot --danger --max-budget 1.0   # budget cap per invocation
-uv run ccflow bot --danger --subprocess-timeout 600
-```
-
-### Table Image Rendering (Optional)
-
-When `ENABLE_TABLE_IMAGE=true`, markdown tables in Claude's output are rendered as PNG images using headless Chromium, then sent as photos. This makes tables readable on mobile.
-
-**Setup:**
-
-```bash
-# 1. Install with table-image extra
-uv add "ccflow[table-image] @ git+https://github.com/JumpBearCode/CCFlow.git"
-# or for local dev:
-uv sync --extra table-image
-
-# 2. Install Chromium (one-time, ~300MB, stored in user cache)
-uv run playwright install chromium
-
-# Linux servers also need system dependencies:
-uv run playwright install-deps chromium
-```
-
-**Docker:**
-
-```dockerfile
-RUN uv sync --extra table-image \
-    && uv run playwright install-deps chromium \
-    && uv run playwright install chromium
-```
-
-Then set `ENABLE_TABLE_IMAGE=true` in your `.env`.
-
-If Playwright is not installed or rendering fails, it falls back to sending the raw table as `<pre>` text.
