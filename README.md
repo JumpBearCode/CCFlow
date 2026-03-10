@@ -17,7 +17,22 @@ Claude Code CLI wrapper — a Python library + CLI that wraps `claude -p` into a
 
 ## Install
 
-### From GitHub (recommended for other projects)
+### As a global CLI tool (recommended)
+
+```bash
+git clone https://github.com/JumpBearCode/CCFlow.git
+cd CCFlow
+cp .env.example .env   # edit .env with your tokens
+uv tool install --editable .
+```
+
+After installation, `ccflow` is available globally from any directory. The `--editable` flag is required — CCFlow loads `.env` relative to its source tree, so the installed command must point back to the cloned repo.
+
+To upgrade after pulling new changes, no reinstall needed — editable mode picks up changes automatically.
+
+### As a project dependency (library only)
+
+Use this when you want to import `ClaudeOrchestrator` in your own project. The Telegram bot and CLI features require the global install above.
 
 ```bash
 # Using uv
@@ -25,23 +40,6 @@ uv add git+https://github.com/JumpBearCode/CCFlow.git
 
 # Using pip
 pip install git+https://github.com/JumpBearCode/CCFlow.git
-```
-
-### From local path
-
-```bash
-# Using uv
-uv add /path/to/CCFlow
-
-# Using pip
-pip install /path/to/CCFlow
-```
-
-### For development (editable)
-
-```bash
-cd CCFlow
-uv pip install -e .
 ```
 
 ## Using CCFlow in Other uv Projects
@@ -270,22 +268,19 @@ CCFlow includes a Telegram bot that bridges messages to Claude. Each chat mainta
 
 ### Setup
 
-**1. Create a `.env` file in the project root:**
-
-```env
-TELEGRAM_BOT_TOKEN=your-bot-token-from-botfather
-TELEGRAM_ALLOWED_USERS=123456789,987654321
-
-# Optional
-OUTPUT_FORMAT=streaming
-CLAUDE_SUBPROCESS_TIMEOUT=300
-ENABLE_TABLE_IMAGE=false
-```
-
-**2. Run the bot:**
+The `.env` file should already be configured during installation (see [Install](#install)). Then run:
 
 ```bash
-uv run ccflow bot --danger
+ccflow bot --danger
+```
+
+If you need table image rendering, also install Chromium (one-time):
+
+```bash
+playwright install chromium
+
+# Linux servers also need system dependencies:
+playwright install-deps chromium
 ```
 
 ### Environment Variables
