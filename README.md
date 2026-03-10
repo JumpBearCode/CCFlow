@@ -24,6 +24,7 @@ git clone https://github.com/JumpBearCode/CCFlow.git
 cd CCFlow
 cp .env.example .env   # edit .env with your tokens
 uv tool install --editable .
+uv tool update-shell
 ```
 
 After installation, `ccflow` is available globally from any directory. The `--editable` flag is required — CCFlow loads `.env` relative to its source tree, so the installed command must point back to the cloned repo.

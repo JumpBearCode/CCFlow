@@ -517,6 +517,7 @@ def bot_main(args: list[str]) -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     bot = TelegramBot(
         token=token,
