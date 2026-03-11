@@ -464,7 +464,7 @@ class TelegramBot:
             filters,
         )
 
-        app = ApplicationBuilder().token(self.token).build()
+        app = ApplicationBuilder().token(self.token).concurrent_updates(True).build()
 
         app.add_handler(CommandHandler("start", self._handle_start))
         app.add_handler(CommandHandler("reset", self._handle_reset))
