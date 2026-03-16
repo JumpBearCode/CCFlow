@@ -126,9 +126,14 @@ class CodexOrchestrator:
     def _build_cmd(self) -> list[str]:
         """Convert configuration into a ``codex exec`` CLI argument list.
 
-        Normal:  ["codex", "exec", "--json", "-m", model, ...flags..., "-"]
-        Resume:  ["codex", "exec", "resume", "--json", "-m", model, ...flags..., thread_id, "-"]
-        Continue: ["codex", "exec", "resume", "--json", "--last", "-m", model, ...flags..., "-"]
+        Normal:   ["codex", "exec", "--json", "-m", model, ...flags..., "-"]
+        Resume:   ["codex", "exec", "resume", "--json", "-m", model, thread_id, "-"]
+        Continue: ["codex", "exec", "resume", "--json", "-m", model, "--last", "-"]
+
+        Note: ``codex exec resume`` only accepts ``--json``, ``-m/--model``,
+        ``--last``, ``[SESSION_ID]``, and ``[PROMPT]``.  All other flags
+        (``--sandbox``, ``--ephemeral``, ``--image``, etc.) are ignored when
+        resuming because the CLI rejects them.
 
         Returns:
             List of strings suitable for ``subprocess.Popen()``.
@@ -137,9 +142,17 @@ class CodexOrchestrator:
 
         if is_resume:
             cmd = ["codex", "exec", "resume", "--json"]
-        else:
-            cmd = ["codex", "exec", "--json"]
+            cmd += ["-m", self.model]
 
+            if self.continue_session:
+                cmd.append("--last")
+            elif self.resume_session:
+                cmd.append(self.resume_session)
+
+            cmd.append("-")
+            return cmd
+
+        cmd = ["codex", "exec", "--json"]
         cmd += ["-m", self.model]
 
         # Sandbox resolution: dangerously_skip_permissions > full_auto > sandbox
@@ -173,12 +186,6 @@ class CodexOrchestrator:
 
         if self.skip_git_repo_check:
             cmd.append("--skip-git-repo-check")
-
-        # Resume/continue positional args
-        if self.continue_session:
-            cmd.append("--last")
-        elif self.resume_session:
-            cmd.append(self.resume_session)
 
         # Prompt from stdin
         cmd.append("-")
