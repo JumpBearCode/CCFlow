@@ -269,6 +269,8 @@ class TelegramBot:
             session.engine = engine
             # Claude/Codex backends don't share sessions — discard old session
             session.session_id = None
+            # Reset model to engine default (Claude models ≠ Codex models)
+            session.model = self.model if engine == "claude" else "gpt-5.4"
 
             label = "Claude" if engine == "claude" else "Codex"
             await context.bot.send_message(chat_id, f"Change to {label}")
