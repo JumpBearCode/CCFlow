@@ -15,8 +15,10 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from ccflow.agent.codex_orchestrator import CodexOrchestrator
 from ccflow.agent.orchestrator import ClaudeOrchestrator
 from ccflow.telegram.event_formatter import (
+    _codex_event_to_telegram,
     _event_to_telegram,
     _markdown_to_telegram_html,
     _render_table_image,
@@ -37,12 +39,13 @@ class ChatSession:
 
     session_id: str | None = None
     model: str = "opus"
+    engine: str = "claude"  # "claude" or "codex"
     last_active: float = field(default_factory=time.monotonic)
     busy: bool = False
     cwd: str | None = None
     log_path: str | None = None
     status_message_id: int | None = None
-    _orchestrator: "ClaudeOrchestrator | None" = field(default=None, repr=False)
+    _orchestrator: "ClaudeOrchestrator | CodexOrchestrator | None" = field(default=None, repr=False)
     _stopped: bool = False
 
 
@@ -117,6 +120,29 @@ class TelegramBot:
             cwd=session.cwd,
         )
 
+    def _make_codex_orchestrator(self, session: ChatSession) -> CodexOrchestrator:
+        return CodexOrchestrator(
+            model=session.model,
+            dangerously_skip_permissions=self.danger,
+            resume_session=session.session_id,
+            log_path=session.log_path,
+            cwd=session.cwd,
+        )
+
+    async def _handle_cli(self, update, context) -> None:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        keyboard = [
+            [
+                InlineKeyboardButton("Claude", callback_data="cli:claude"),
+                InlineKeyboardButton("Codex", callback_data="cli:codex"),
+            ]
+        ]
+        await update.message.reply_text(
+            "Select engine:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
     async def _handle_start(self, update, context) -> None:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -129,6 +155,7 @@ class TelegramBot:
             "Welcome to CCFlow Bot!\n",
             "Send any message and I'll forward it to Claude.\n",
             "Commands:",
+            "/cli — Switch engine (Claude / Codex)",
             "/reset — End current conversation & return to project root",
             "/stop — Stop the running Claude session",
             "/model <name> — Switch model (e.g. sonnet, opus)",
@@ -189,6 +216,7 @@ class TelegramBot:
         idle = int(time.monotonic() - session.last_active)
         await update.message.reply_text(
             f"Session ID: {session.session_id or '(new)'}\n"
+            f"Engine: {session.engine}\n"
             f"Model: {session.model}\n"
             f"CWD: {session.cwd}\n"
             f"Idle: {idle}s\n"
@@ -200,38 +228,54 @@ class TelegramBot:
         query = update.callback_query
         data = query.data or ""
 
-        if not data.startswith("cd:"):
-            await query.answer("Unknown action.")
-            return
+        if data.startswith("cd:"):
+            dirname = data[3:]
+            target = (self.project_root / dirname).resolve()
+            if not target.is_relative_to(self.project_root) or not target.is_dir():
+                await query.answer("Invalid directory.")
+                return
 
-        dirname = data[3:]
-        target = (self.project_root / dirname).resolve()
-        if not target.is_relative_to(self.project_root) or not target.is_dir():
-            await query.answer("Invalid directory.")
-            return
+            chat_id = update.effective_chat.id
+            session = self._get_or_create_session(chat_id)
 
-        chat_id = update.effective_chat.id
-        session = self._get_or_create_session(chat_id)
+            # Unpin previous status message if any
+            if session.status_message_id:
+                try:
+                    await context.bot.unpin_chat_message(chat_id, session.status_message_id)
+                except Exception:
+                    pass
 
-        # Unpin previous status message if any
-        if session.status_message_id:
+            session.cwd = str(target)
+            self._init_session_log(session)
+
+            # Send and pin new status message
+            msg = await context.bot.send_message(chat_id, f"\U0001f4c2 {dirname}")
+            session.status_message_id = msg.message_id
             try:
-                await context.bot.unpin_chat_message(chat_id, session.status_message_id)
+                await context.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
             except Exception:
                 pass
 
-        session.cwd = str(target)
-        self._init_session_log(session)
+            await query.answer(f"Switched to {dirname}")
 
-        # Send and pin new status message
-        msg = await context.bot.send_message(chat_id, f"\U0001f4c2 {dirname}")
-        session.status_message_id = msg.message_id
-        try:
-            await context.bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
-        except Exception:
-            pass
+        elif data.startswith("cli:"):
+            engine = data[4:]  # "claude" or "codex"
+            if engine not in ("claude", "codex"):
+                await query.answer("Unknown engine.")
+                return
 
-        await query.answer(f"Switched to {dirname}")
+            chat_id = update.effective_chat.id
+            session = self._get_or_create_session(chat_id)
+            session.engine = engine
+            # Claude/Codex backends don't share sessions — discard old session
+            session.session_id = None
+
+            label = "Claude" if engine == "claude" else "Codex"
+            await context.bot.send_message(chat_id, f"Change to {label}")
+            await query.answer(f"Switched to {label}")
+
+        else:
+            await query.answer("Unknown action.")
 
     async def _handle_mkdir(self, update, context) -> None:
         if not context.args:
@@ -290,14 +334,17 @@ class TelegramBot:
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(self._keep_typing(chat_id, context.bot, stop_typing))
 
-        orc: ClaudeOrchestrator | None = None
+        orc: ClaudeOrchestrator | CodexOrchestrator | None = None
         try:
-            orc = self._make_orchestrator(session)
+            if session.engine == "codex":
+                orc = self._make_codex_orchestrator(session)
+            else:
+                orc = self._make_orchestrator(session)
             session._orchestrator = orc
             session._stopped = False
 
             if self.output_format == "streaming":
-                result = await self._run_streaming(orc, text, update)
+                result = await self._run_streaming(orc, text, update, engine=session.engine)
             else:
                 result = await self._run_batch(orc, text)
 
@@ -398,10 +445,18 @@ class TelegramBot:
             timeout=self.subprocess_timeout,
         )
 
-    async def _run_streaming(self, orc: ClaudeOrchestrator, text: str, update):
+    async def _run_streaming(
+        self,
+        orc: "ClaudeOrchestrator | CodexOrchestrator",
+        text: str,
+        update,
+        *,
+        engine: str = "claude",
+    ):
         """Streaming mode: send tool calls, thinking, and result status in real-time."""
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        formatter = _codex_event_to_telegram if engine == "codex" else _event_to_telegram
 
         def on_event(event: dict) -> None:
             loop.call_soon_threadsafe(queue.put_nowait, event)
@@ -415,7 +470,7 @@ class TelegramBot:
                 if event is None:
                     break
 
-                items = _event_to_telegram(event)
+                items = formatter(event)
 
                 for category, formatted_text in items:
                     if category in ("tool_done", "text", "status"):
@@ -467,6 +522,7 @@ class TelegramBot:
         app = ApplicationBuilder().token(self.token).concurrent_updates(True).build()
 
         app.add_handler(CommandHandler("start", self._handle_start))
+        app.add_handler(CommandHandler("cli", self._handle_cli))
         app.add_handler(CommandHandler("reset", self._handle_reset))
         app.add_handler(CommandHandler("model", self._handle_model))
         app.add_handler(CommandHandler("status", self._handle_status))
