@@ -185,6 +185,75 @@ def _event_to_telegram(event: dict) -> list[tuple[str, str]]:
     return []
 
 
+def _codex_event_to_telegram(event: dict) -> list[tuple[str, str]]:
+    """Classify a Codex JSONL event into (category, formatted_text) pairs for Telegram.
+
+    Categories match ``_event_to_telegram``: "tool", "tool_done", "tool_error",
+    "text", "result", "status".  Returns an empty list for suppressed events.
+    """
+    etype = event.get("type", "")
+
+    if etype == "item.started":
+        item = event.get("item", {})
+        if item.get("type") == "command_execution":
+            cmd = item.get("command", "")
+            # Strip shell wrapper prefix
+            for prefix in ("/bin/zsh -lc ", "/bin/bash -lc ", "/bin/sh -c "):
+                if cmd.startswith(prefix):
+                    cmd = cmd[len(prefix):]
+                    if len(cmd) >= 2 and cmd[0] in ("'", '"') and cmd[-1] == cmd[0]:
+                        cmd = cmd[1:-1]
+                    break
+            return [("tool", f"\u2328\ufe0f shell  command={shorten(cmd, 120)!r}")]
+        return []
+
+    if etype == "item.completed":
+        item = event.get("item", {})
+        item_type = item.get("type", "")
+
+        if item_type == "agent_message":
+            text = item.get("text", "").strip()
+            if text:
+                return [("text", text)]
+            return []
+
+        if item_type == "command_execution":
+            exit_code = item.get("exit_code")
+            if exit_code is not None and exit_code != 0:
+                output = item.get("output", "")
+                msg = f"Exit code: {exit_code}"
+                if output:
+                    msg += f" — {shorten(output, 150)}"
+                return [("tool_error", f"\u274c {msg}")]
+            return [("tool_done", "\u2705 Done")]
+
+        return []
+
+    if etype == "turn.completed":
+        usage = event.get("usage") or {}
+        inp = usage.get("input_tokens", 0)
+        out = usage.get("output_tokens", 0)
+        num_turns = 1  # each turn.completed = 1 turn
+        parts = [f"{num_turns} turn"]
+        if inp or out:
+            parts.append(f"{inp}in/{out}out")
+        return [("result", f"\u2705 Turn completed ({' | '.join(parts)})")]
+
+    if etype == "error":
+        msg = event.get("message", "Unknown error")
+        return [("tool_error", f"\u274c {msg}")]
+
+    if etype == "turn.failed":
+        msg = event.get("message", "Turn failed")
+        return [("tool_error", f"\u274c {msg}")]
+
+    if etype == "thread.started":
+        thread_id = event.get("thread_id", "")
+        return [("status", f"Codex session started (thread: {shorten(thread_id, 20)})")]
+
+    return []
+
+
 def _split_message(text: str, max_len: int = 4096) -> list[str]:
     """Split text into chunks that fit Telegram's message size limit."""
     if len(text) <= max_len:
